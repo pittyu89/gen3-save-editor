@@ -18,7 +18,7 @@ const st = {
   armDelete: false,
   confirmExport: null as string[] | null,
   error: "",
-  rom: null as { data: C.GameData; header: C.RomHeader; report: string[]; fileName: string } | null,
+  rom: null as { data: C.GameData; header: C.RomHeader; report: string[]; fileName: string; bytes: Uint8Array; sprites: C.SpriteTables | null } | null,
   busy: "",
   sheet: false,                      // phone: editor sheet open
   moving: null as Sel,               // tap-to-move source
@@ -181,7 +181,10 @@ async function loadRom(buf: Uint8Array, name: string) {
   await new Promise(r => setTimeout(r, 30));
   try {
     const res = C.loadRomData(buf);
-    st.rom = { ...res, fileName: name };
+    const sprites = (() => { try { return C.findSpriteTables(buf, res.data.species.length, res.record ?? undefined); } catch { return null; } })();
+    st.rom = { ...res, fileName: name, bytes: buf, sprites };
+    spriteCache.clear();
+    if (!sprites) res.report.push("sprites not found (this ROM may use a newer compression)");
     optCache = null;
     toast(`Loaded ${res.data.species.length - 1} species, ${res.data.moves.length - 1} moves and ${res.data.items.length - 1} items from ${res.header.title || name}.`, "good");
     if (st.save) {
@@ -350,7 +353,7 @@ function renderTop() {
       s ? field("Game / engine", "gameSel", select("gameSel", s.profile.id, C.PROFILES.map(p => [p.id, p.name]), v => reparse(v))) : null,
       s ? h("div", { class: "field" }, h("span", { class: "fieldlabel" }, "Save slot"), slotChip) : null,
       h("div", { class: "row tight phone-only-flex" },
-        fileButton(st.rom ? "ROM loaded ✓" : "Load ROM", "btn", "rom", { title: "Optional: read species, move and item names from your ROM" }),
+        fileButton(st.rom ? "ROM loaded ✓" : "Load ROM (sprites)", "btn", "rom", { title: "Optional: read species, move and item names from your ROM" }),
         s ? h("button", { class: "btn", onclick: exportBackup }, "Download original") : null)),
     h("div", { class: "actgroup export" },
       h("span", { class: "desktop-only" },
@@ -377,7 +380,8 @@ function renderTop() {
         h("button", { class: "btn", onclick: () => { st.confirmExport = null; renderAll(); } }, "Go back")));
   } else if (st.isDemo) {
     banner.hidden = false; banner.className = "banner";
-    mount(banner, h("strong", {}, "Example save. "), "This is a generated Emerald save so you can try the editor. Open your own .sav to edit it; files never leave this device.");
+    mount(banner, h("strong", {}, "Example save. "), "This is a generated Emerald save so you can try the editor. Open your own .sav to edit it; files never leave this device. ",
+      st.rom ? null : [fileButton("Load your ROM", "linkish", "rom"), " to show Pokémon sprites."]);
   } else if (romMismatch) {
     banner.hidden = false; banner.className = "banner warn";
     mount(banner, h("strong", {}, "ROM not used. "), `The loaded ROM (${st.rom!.header.code}) is for a different game than this save, so built-in names are shown. `,
@@ -445,6 +449,63 @@ function renderNav() {
   );
 }
 
+// ---------- Sprites and icons ----------
+// Sprites come only from the user's own ROM and are decoded on this device; none ship with the editor.
+
+const spriteCache = new Map<string, string | null>();
+function spriteURL(species: number, shiny: boolean): string | null {
+  const r = st.rom, s = st.save;
+  if (!r?.sprites || !s || !romFits(s.profile)) return null;
+  const key = `${species}-${shiny ? 1 : 0}`;
+  if (spriteCache.has(key)) return spriteCache.get(key)!;
+  let url: string | null = null;
+  try {
+    const spr = C.decodeSprite(r.bytes, r.sprites, species, shiny);
+    if (spr) {
+      const c = document.createElement("canvas");
+      c.width = spr.width; c.height = spr.height;
+      c.getContext("2d")!.putImageData(new ImageData(spr.rgba, spr.width, spr.height), 0, 0);
+      url = c.toDataURL("image/png");
+    }
+  } catch { url = null; }
+  spriteCache.set(key, url);
+  return url;
+}
+
+const svg = (body: string, cls: string, label?: string) => {
+  const span = h("span", { class: cls, "aria-hidden": label ? undefined : "true", role: label ? "img" : undefined, "aria-label": label });
+  span.innerHTML = body;
+  return span;
+};
+const ICON = {
+  item: '<svg viewBox="0 0 16 16"><path d="M2 2h6l6 6-6 6-6-6z" fill="currentColor"/><circle cx="5" cy="5" r="1.4" fill="var(--surface)"/></svg>',
+  egg: '<svg viewBox="0 0 32 32"><ellipse cx="16" cy="18" rx="10" ry="12" fill="#f3ead2" stroke="#b9a978" stroke-width="1.5"/><circle cx="12" cy="14" r="2.4" fill="#8fbf7a"/><circle cx="20" cy="20" r="3" fill="#8fbf7a"/><circle cx="14" cy="24" r="1.8" fill="#8fbf7a"/></svg>',
+  star: '<svg viewBox="0 0 16 16"><path d="M8 1l2 4.6 5 .5-3.8 3.3 1.1 4.9L8 11.8 3.7 14.3l1.1-4.9L1 6.1l5-.5z" fill="currentColor"/></svg>',
+};
+
+/** Sprite from the ROM, or an original placeholder: a type-tinted disc with the name's initial. */
+function monArt(m: C.Pokemon, size: "sm" | "md" | "lg") {
+  if (m.isEgg) return svg(ICON.egg, `art ${size} egg`, "Egg");
+  const url = spriteURL(m.species, C.isShiny(m));
+  if (url) return h("img", { class: `art ${size} sprite`, src: url, alt: "", width: 64, height: 64, decoding: "async" });
+  const type = C.data().info[m.species]?.t?.[0] ?? "Normal";
+  return h("span", { class: `art ${size} ph`, "data-type": type, "aria-hidden": "true" }, C.speciesName(m.species).replace(/^Species /, "#").slice(0, 2));
+}
+
+function typeBadges(species: number) {
+  const t = C.data().info[species]?.t;
+  if (!t) return null;
+  return h("span", { class: "types" }, t.map(x => h("span", { class: "typebadge", "data-type": x }, x)));
+}
+
+const STATUS = (st: number): string | null =>
+  st & 7 ? "SLP" : st & 0x80 ? "TOX" : st & 8 ? "PSN" : st & 0x10 ? "BRN" : st & 0x20 ? "FRZ" : st & 0x40 ? "PAR" : null;
+
+function genderMark(m: C.Pokemon) {
+  const g = C.gender(m);
+  return g === "-" ? null : h("span", { class: `gender ${g === "M" ? "m" : "f"}`, title: g === "M" ? "Male" : "Female" }, g === "M" ? "♂" : "♀");
+}
+
 function slotTile(m: C.Pokemon | null, sel: NonNullable<Sel>, label: string) {
   const isSel = st.sel && st.sel.where === sel.where && st.sel.i === sel.i && (sel.where === "party" || (st.sel as any).box === (sel as any).box);
   const warn = m ? C.validatePokemon(m, codecAt(sel)) : [];
@@ -467,9 +528,21 @@ function slotTile(m: C.Pokemon | null, sel: NonNullable<Sel>, label: string) {
     ondrop: (e: DragEvent) => { e.preventDefault(); try { swap(JSON.parse(e.dataTransfer!.getData("text/plain")), sel); } catch { /* ignore */ } },
   },
     m ? [
-      h("span", { class: "dex" }, m.isEgg ? "Egg" : dexNo(m.species)),
-      h("span", { class: "sp" }, m.isEgg ? "Egg" : C.speciesName(m.species)),
-      h("span", { class: "lv" }, `Lv ${lvl ?? "?"}`, C.isShiny(m) ? h("span", { class: "shiny", title: "Shiny" }, " ★") : null),
+      monArt(m, sel.where === "party" ? "md" : "sm"),
+      h("span", { class: "slotinfo2" },
+        sel.where === "party" ? h("span", { class: "dex" }, m.isEgg ? "Egg" : dexNo(m.species)) : null,
+        h("span", { class: "sp" }, m.isEgg ? "Egg" : (sel.where === "party" && m.nickname ? m.nickname : C.speciesName(m.species))),
+        h("span", { class: "lv" }, `Lv ${lvl ?? "?"}`, m.isEgg ? null : genderMark(m)),
+        sel.where === "party" && m.party ? (() => {
+          const pct = m.party!.stats[0] ? Math.max(0, Math.min(100, Math.round(m.party!.hp / m.party!.stats[0] * 100))) : 0;
+          const stc = STATUS(m.party!.status);
+          return h("span", { class: "hprow" },
+            h("span", { class: `hpbar ${pct <= 20 ? "low" : pct <= 50 ? "mid" : ""}`, role: "img", "aria-label": `HP ${m.party!.hp} of ${m.party!.stats[0]}` }, h("span", { style: { width: `${pct}%` } })),
+            stc ? h("span", { class: `status s-${stc.toLowerCase()}` }, stc) : null);
+        })() : null),
+      h("span", { class: "badges" },
+        C.isShiny(m) ? svg(ICON.star, "badge shiny", "Shiny") : null,
+        m.heldItem ? svg(ICON.item, "badge item", `Holding ${C.itemName(m.heldItem)}`) : null),
       warn.length ? h("span", { class: "dot", "aria-hidden": "true" }) : null,
     ] : h("span", { class: "emptylabel" }, "Empty"));
 }
@@ -671,9 +744,12 @@ function editor(m: C.Pokemon) {
       h("span", { class: "grab", "aria-hidden": "true" }),
       h("button", { class: "btn small", onclick: closeSheet }, "Done")),
     h("div", { class: "edhead", "data-type": info?.t?.[0] ?? "Normal" },
+      h("div", { class: "edart" }, monArt(m, "lg")),
       h("div", { class: "edid" },
-        h("div", { class: "edtitle" }, m.nickname || C.speciesName(m.species), C.isShiny(m) ? h("span", { class: "shiny" }, " ★") : null),
-        h("div", { class: "muted" }, `${speciesLabel(m.species)} · Lv ${lvl ?? "?"} · ${g === "-" ? "Genderless" : g === "M" ? "♂" : "♀"}${info?.t ? ` · ${info.t.join("/")}` : ""}`)),
+        h("div", { class: "edtitle" }, m.nickname || C.speciesName(m.species), C.isShiny(m) ? svg(ICON.star, "badge shiny big", "Shiny") : null),
+        h("div", { class: "muted" }, `${speciesLabel(m.species)} · Lv ${lvl ?? "?"}`, " ", genderMark(m)),
+        h("div", { class: "edmeta" }, typeBadges(m.species),
+          m.heldItem ? h("span", { class: "itemchip" }, svg(ICON.item, "badge item"), C.itemName(m.heldItem)) : null)),
       h("div", { class: "row tight edactions" },
         h("button", { class: "btn small", onclick: () => { st.moving = sel; st.sheet = false; renderAll(); } }, "Move"),
         h("button", { class: "btn small", onclick: () => { st.clip = C.cloneMon(m); toast(`Copied ${C.speciesName(m.species)}. Tap an empty slot to paste.`, ""); renderAll(); } }, "Copy"),

@@ -3,7 +3,7 @@ import {
   sectorChecksum, w32, w16, u16, decodeText, encodeText, encodeBytes, unencodable, getProfile, PROFILES,
   detect, parse, write, verify, decodePokemon, encodePokemon, levelOf, setLevel, calcStats,
   isShiny, rerollPid, nature, gender, expForLevel, VANILLA, setData, data, nationalFallback, fallbackDataFor,
-  setShiny, abilityId, crc32, zipStore, loadRomData, readRomHeader,
+  setShiny, abilityId, crc32, zipStore, loadRomData, readRomHeader, findSpriteTables, decodeSprite, lz77,
   SECTOR_SIZE, BOX_SIZE, PARTY_SIZE, CFRU_BOX_SIZE, Pokemon, GameProfile,
 } from "../src/core";
 import { buildSave, makeMon } from "../src/core/fixtures";
@@ -319,6 +319,30 @@ describe("ROM reader", () => {
       expect(data().source).toBe("rom");
     });
   }
+  for (const style of ["inline", "pointer"] as const) {
+    it(`decodes front sprites from ${style === "inline" ? "vanilla/CFRU tables" : "expansion records"}`, () => {
+      const rom = fakeRom(style);
+      const res = loadRomData(rom);
+      const t = findSpriteTables(rom, res.data.species.length, res.record ?? undefined)!;
+      expect(t).not.toBeNull();
+      expect(t.kind).toBe(style === "inline" ? "tables" : "records");
+      const sp = decodeSprite(rom, t, 4)!;
+      expect(sp.width).toBe(64);
+      const mid = (36 * 64 + 32) * 4;
+      expect([...sp.rgba.subarray(mid, mid + 4)]).toEqual([255, 0, 0, 255]);
+      expect(sp.rgba[3]).toBe(0); // corner is transparent
+      if (style === "inline") {
+        const sh = decodeSprite(rom, t, 4, true)!;
+        expect([...sh.rgba.subarray(mid, mid + 4)]).toEqual([0, 0, 255, 255]);
+      }
+      expect(decodeSprite(rom, t, 0)).toBeNull();
+    });
+  }
+  it("decompresses GBA LZ77 with back-references", () => {
+    // 'ab' literal then copy 6 bytes from distance 2 -> 'abababab'
+    const data = new Uint8Array([0x10, 8, 0, 0, 0b00100000, 0x61, 0x62, (3 << 4) | 0, 1]);
+    expect(String.fromCharCode(...lz77(data, 0)!)).toBe("abababab");
+  });
   it("rejects files that aren't GBA ROMs", () => {
     expect(() => loadRomData(new Uint8Array(1024))).toThrow();
   });

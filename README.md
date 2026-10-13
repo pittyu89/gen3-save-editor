@@ -35,6 +35,9 @@ A hack that changes these layouts beyond what the engine does by default will sh
 - Name tables are located from entries every engine keeps (Bulbasaur/Ivysaur/Venusaur, Pound/Karate Chop/Double Slap, Master/Ultra/Great Ball, Stench/Drizzle/Speed Boost). Both inline-name tables (vanilla, CFRU) and records holding name pointers (expansion) are handled.
 - The base-stats table is found from Bulbasaur–Charmander's stats. Field offsets for gender ratio, growth rate, abilities (u8 or u16, with or without a hidden slot) and types are learned by matching values that are identical across engines.
 - Move PP comes from the move record (expansion) or a separate battle-move table (vanilla, CFRU).
+- Front sprites and normal/shiny palettes are found from the 8-byte picture/palette tables whose tags run 1, 2, 3… (vanilla, CFRU), or from LZ77 sprite pointers inside expansion's SpeciesInfo records. They are decoded (LZ77 + 4bpp tiles) on the device. Newer expansion builds compress sprites with "smol", which isn't read yet, so they show placeholders.
+
+No Pokémon artwork ships with the editor. Without a ROM, slots show an original placeholder (a type-tinted disc with the species' initials); type badges, gender marks, held-item, shiny and status icons are the editor's own.
 
 Without a ROM, hack profiles fall back to Gen III data (indexed nationally for expansion), and the UI says so.
 

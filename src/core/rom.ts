@@ -159,7 +159,7 @@ function findPP(rom: Uint8Array, moveTable: Table | null, count: number): number
   return null;
 }
 
-export interface RomLoadResult { data: GameData; header: RomHeader; report: string[] }
+export interface RomLoadResult { data: GameData; header: RomHeader; report: string[]; record: { at: number; stride: number } | null }
 
 export function loadRomData(rom: Uint8Array): RomLoadResult {
   const header = readRomHeader(rom);
@@ -242,5 +242,5 @@ export function loadRomData(rom: Uint8Array): RomLoadResult {
     items, abilities, shedinja,
     notes: report.filter(r => /not found/.test(r)),
   };
-  return { data: gameData, header, report };
+  return { data: gameData, header, report, record: bs };
 }

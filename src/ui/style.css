@@ -191,6 +191,56 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
   background: var(--fg); color: var(--bg); padding: 10px 16px; border-radius: var(--r); font-size: 0.9rem; z-index: 10; box-shadow: 0 4px 18px rgb(0 0 0 / 0.25); }
 .toast.bad { background: var(--bad); color: var(--surface); }
 
+/* ---------- Sprites, badges and icons ---------- */
+.art { flex: none; display: inline-grid; place-items: center; }
+.art.sprite { image-rendering: pixelated; image-rendering: crisp-edges; object-fit: contain; }
+.art.sm { width: 48px; height: 48px; }
+.art.md { width: 64px; height: 64px; }
+.art.lg { width: 112px; height: 112px; }
+.art.ph { border-radius: 50%; background: color-mix(in srgb, var(--slot-type, var(--t-Normal)) 22%, var(--surface)); color: var(--slot-type, var(--t-Normal));
+  border: 2px solid color-mix(in srgb, var(--slot-type, var(--t-Normal)) 55%, transparent); font-family: var(--font-display); font-weight: 600; text-transform: uppercase; }
+.art.ph.sm { width: 34px; height: 34px; font-size: 0.8rem; margin: 7px auto; }
+.art.ph.md { width: 46px; height: 46px; font-size: 1rem; margin: 9px; }
+.art.ph.lg { width: 80px; height: 80px; font-size: 1.6rem; margin: 16px; }
+.art.egg svg { width: 100%; height: 100%; }
+.art.egg.sm { width: 36px; height: 36px; margin: 6px auto; }
+.art.egg.md { width: 48px; height: 48px; margin: 8px; }
+.art.egg.lg { width: 84px; height: 84px; margin: 14px; }
+.slotinfo2 { display: flex; flex-direction: column; min-width: 0; max-width: 100%; }
+.grid.party .slot { flex-direction: row; align-items: center; justify-content: flex-start; gap: 6px; padding-block: 6px; }
+.grid.party .slot .slotinfo2 { flex: 1; }
+.grid.box .slot { align-items: center; justify-content: center; text-align: center; padding: 4px 4px 6px 8px; }
+.grid.box .slot .slotinfo2 { align-items: center; }
+.grid.box .slot .lv { display: flex; gap: 3px; justify-content: center; }
+.badges { position: absolute; top: 4px; right: 5px; display: flex; gap: 2px; }
+.badge { display: inline-grid; width: 14px; height: 14px; }
+.badge svg { width: 100%; height: 100%; }
+.badge.shiny { color: var(--select); }
+.badge.item { color: var(--muted); }
+.badge.big { width: 18px; height: 18px; vertical-align: -2px; margin-left: 6px; }
+.slot .dot { top: auto; bottom: 6px; right: 6px; }
+.gender { font-weight: 700; margin-left: 4px; }
+.gender.m { color: #3d7ad6; } .gender.f { color: #d65a7a; }
+.hprow { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+.hpbar { flex: 1; max-width: 120px; height: 6px; border-radius: 3px; background: var(--sunk); border: 1px solid var(--line); overflow: hidden; }
+.hpbar > span { display: block; height: 100%; background: var(--ok); }
+.hpbar.mid > span { background: var(--warn); } .hpbar.low > span { background: var(--bad); }
+.status { font-size: 0.6rem; font-weight: 700; padding: 1px 4px; border-radius: 3px; color: #fff; letter-spacing: 0.04em; }
+.s-psn, .s-tox { background: #8d4a9a; } .s-brn { background: #d9692d; } .s-par { background: #c79a10; } .s-slp { background: #6f7a86; } .s-frz { background: #3f9fb0; }
+.types { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.typebadge { font-size: 0.68rem; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; color: #fff; background: var(--slot-type, var(--t-Normal)); }
+.typebadge[data-type="Electric"], .typebadge[data-type="Ice"], .typebadge[data-type="Normal"], .typebadge[data-type="Ground"], .typebadge[data-type="Bug"], .typebadge[data-type="Rock"], .typebadge[data-type="Steel"], .typebadge[data-type="Flying"] { color: #1d1d16; }
+.edhead { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 4px 12px; border-left: 0; padding-left: 0; }
+.edhead .edactions { grid-column: 1 / -1; }
+.edart { border-radius: 12px; background: radial-gradient(circle at 50% 60%, color-mix(in srgb, var(--slot-type, var(--t-Normal)) 28%, var(--surface)) 0 55%, transparent 70%); }
+.edmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.itemchip { display: inline-flex; align-items: center; gap: 4px; font-size: 0.75rem; font-weight: 700; color: var(--muted); }
+.itemchip .badge { width: 12px; height: 12px; }
+@supports not (background: color-mix(in srgb, red 10%, blue)) {
+  .art.ph { background: var(--sunk); border-color: var(--slot-type, var(--t-Normal)); }
+  .edart { background: var(--sunk); }
+}
+
 /* ---------- Top bar groups ---------- */
 .topactions { gap: 10px 14px; }
 .actgroup { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; }
@@ -275,6 +325,15 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
   .grid.box .slot { min-height: 60px; padding: 5px 4px 5px 8px; gap: 0; border-radius: 6px; }
   .grid.box .slot.full::before { width: 4px; }
   .grid.box .slot .dex { display: none; }
+  .grid.box .art.sm.sprite { width: 40px; height: 40px; }
+  .grid.box .art.ph.sm { width: 28px; height: 28px; font-size: 0.7rem; margin: 4px auto; }
+  .grid.box .art.egg.sm { width: 30px; height: 30px; margin: 4px auto; }
+  .grid.box .badges { top: 2px; right: 2px; }
+  .grid.box .badge { width: 11px; height: 11px; }
+  .grid.box .gender { display: none; }
+  .grid.party .art.md.sprite { width: 52px; height: 52px; }
+  .art.lg { width: 96px; height: 96px; }
+  .art.ph.lg { width: 68px; height: 68px; margin: 14px; }
   .grid.box .slot .sp { font-size: 0.7rem; line-height: 1.2; letter-spacing: -0.01em; }
   .grid.box .slot .lv { font-size: 0.68rem; }
   .grid.box .slot .dot { top: 4px; right: 4px; width: 7px; height: 7px; }
@@ -294,7 +353,7 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
   body.sheet-open .side .card.editor { border: 0; background: transparent; padding: 0; gap: 12px; }
   .sheetbar { position: sticky; top: 0; z-index: 2; justify-content: space-between; align-items: center; margin: 0 -12px; padding: 10px 12px 8px; background: var(--bg); border-bottom: 1px solid var(--line); }
   .grab { width: 40px; height: 5px; border-radius: 3px; background: var(--line); }
-  .edhead { flex-direction: column; }
+
   .edactions { width: 100%; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .edactions .btn { width: 100%; }
   .edtabs { position: sticky; top: 52px; z-index: 1; }

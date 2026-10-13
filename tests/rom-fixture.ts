@@ -1,4 +1,4 @@
-import { encodeBytes, VANILLA, w16, w32 } from "../src/core";
+import { encodeBytes, VANILLA, w16, w32, lz77EncodeLiteral } from "../src/core";
 
 // ---- Synthetic ROMs: tables in both inline (vanilla/CFRU) and pointer (expansion) styles ----
 
@@ -59,6 +59,39 @@ export function fakeRom(style: "inline" | "pointer"): Uint8Array {
   for (let i = 0; i < VANILLA.abilities.length; i++) {
     const nm = style === "inline" ? VANILLA.abilities[i].toUpperCase() : VANILLA.abilities[i];
     rom.set(encodeBytes(nm)!.subarray(0, abStride), 0xc0000 + i * abStride);
+  }
+  // sprites: species s gets a 64x64 image filled with palette colour (s % 15) + 1
+  const SPR = 30;
+  let dataAt = 0x110000;
+  const putLz = (raw: Uint8Array) => { const e = lz77EncodeLiteral(raw); const at = dataAt; rom.set(e, at); dataAt += e.length; return at; };
+  const sprAt: number[] = [], palAt: number[] = [], shinyAt: number[] = [], rawPalAt: number[] = [];
+  for (let sp = 0; sp < SPR; sp++) {
+    const ci = (sp % 15) + 1;
+    // a filled disc, in 8x8 4bpp tiles
+    const tiles = new Uint8Array(0x800);
+    for (let y = 0; y < 64; y++) for (let x = 0; x < 64; x++) {
+      if ((x - 32) ** 2 + (y - 36) ** 2 > (14 + sp % 10) ** 2) continue;
+      const t = (y >> 3) * 8 + (x >> 3), o = t * 32 + (y & 7) * 4 + ((x & 7) >> 1);
+      tiles[o] |= (x & 1) ? ci << 4 : ci;
+    }
+    sprAt.push(putLz(tiles));
+    const pal = new Uint8Array(32); w16(pal, ci * 2, 31 /* red */); const shinyPal = new Uint8Array(32); w16(shinyPal, ci * 2, 31 << 10 /* blue */);
+    palAt.push(putLz(pal)); shinyAt.push(putLz(shinyPal));
+    rawPalAt.push(dataAt); rom.set(pal, dataAt); dataAt += 32;
+  }
+  const P = (i: number) => 0x08000000 + i;
+  if (style === "inline") {
+    for (let sp = 0; sp < N; sp++) {
+      const k = sp < SPR ? sp : 1;
+      w32(rom, 0x100000 + sp * 8, P(sprAt[k])); w16(rom, 0x100000 + sp * 8 + 4, 0x800); w16(rom, 0x100000 + sp * 8 + 6, sp);
+      w32(rom, 0x104000 + sp * 8, P(palAt[k])); w16(rom, 0x104000 + sp * 8 + 4, sp);
+      w32(rom, 0x108000 + sp * 8, P(shinyAt[k])); w16(rom, 0x108000 + sp * 8 + 4, sp + 500);
+    }
+  } else {
+    for (let sp = 1; sp < N; sp++) {
+      const k = sp < SPR ? sp : 1;
+      w32(rom, spBase + sp * 64 + 32, P(sprAt[k])); w32(rom, spBase + sp * 64 + 36, P(rawPalAt[k]));
+    }
   }
   return rom;
 }
