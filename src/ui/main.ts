@@ -20,7 +20,13 @@ const st = {
   error: "",
   rom: null as { data: C.GameData; header: C.RomHeader; report: string[]; fileName: string } | null,
   busy: "",
+  sheet: false,                      // phone: editor sheet open
+  moving: null as Sel,               // tap-to-move source
+  edTab: "info" as "info" | "moves" | "stats" | "ot",
+  fileMenu: false,                   // phone: file options expanded
 };
+
+const isPhone = () => matchMedia("(max-width: 900px)").matches;
 
 const $ = (id: string) => document.getElementById(id)!;
 
@@ -316,9 +322,15 @@ function toast(msg: string, tone: "good" | "bad" | "") {
 function renderAll() {
   renderTop();
   renderNav();
+  renderTabs();
   renderMain();
   renderSide();
+  renderBottom();
+  document.body.classList.toggle("sheet-open", st.sheet && isPhone() && !!st.save && st.view !== "trainer");
 }
+
+function openSheet() { st.sheet = true; }
+function closeSheet() { st.sheet = false; st.armDelete = false; renderAll(); }
 
 function renderTop() {
   const s = st.save;
@@ -330,15 +342,23 @@ function renderTop() {
     h("span", { class: `pill ${s.slot.valid ? "ok" : "bad"}` }, s.slot.valid ? "Checksums OK" : "Checksum errors")) : null;
 
   mount($("topActions"),
-    fileButton("Open save", "btn primary", "save"),
-    s ? select("gameSel", s.profile.id, C.PROFILES.map(p => [p.id, p.name]), v => reparse(v), { "aria-label": "Game or engine" }) : null,
-    fileButton(st.rom ? "ROM loaded" : "Load ROM", "btn", "rom", { title: "Optional: read species, move and item names from your ROM" }),
-    slotChip,
-    h("span", { class: "spacer" }),
-    st.busy ? h("span", { class: "pill warn" }, st.busy) : null,
-    s && st.dirty ? h("span", { class: "pill warn", title: "Edits are not saved to a file yet" }, "Unsaved changes") : null,
-    s ? h("button", { class: "btn primary", onclick: () => exportEdited() }, "Download edited save") : null,
-    s ? h("button", { class: "btn", onclick: exportBackup }, "Download original") : null,
+    h("div", { class: "actgroup open" },
+      fileButton("Open save", "btn primary", "save"),
+      s ? h("button", { class: `btn icon-more ${st.fileMenu ? "on" : ""}`, "aria-expanded": st.fileMenu ? "true" : "false", "aria-controls": "fileMeta",
+        onclick: () => { st.fileMenu = !st.fileMenu; renderAll(); } }, st.fileMenu ? "Done" : "File") : null),
+    h("div", { id: "fileMeta", class: `actgroup meta ${st.fileMenu ? "show" : ""}` },
+      s ? field("Game / engine", "gameSel", select("gameSel", s.profile.id, C.PROFILES.map(p => [p.id, p.name]), v => reparse(v))) : null,
+      s ? h("div", { class: "field" }, h("span", { class: "fieldlabel" }, "Save slot"), slotChip) : null,
+      h("div", { class: "row tight phone-only-flex" },
+        fileButton(st.rom ? "ROM loaded ✓" : "Load ROM", "btn", "rom", { title: "Optional: read species, move and item names from your ROM" }),
+        s ? h("button", { class: "btn", onclick: exportBackup }, "Download original") : null)),
+    h("div", { class: "actgroup export" },
+      h("span", { class: "desktop-only" },
+        fileButton(st.rom ? "ROM loaded ✓" : "Load ROM", "btn", "rom", { title: "Optional: read species, move and item names from your ROM" }),
+        s ? h("button", { class: "btn", onclick: exportBackup }, "Download original") : null),
+      st.busy ? h("span", { class: "pill warn" }, st.busy) : null,
+      s && st.dirty ? h("span", { class: "pill warn", title: "Edits are not saved to a file yet" }, "Unsaved changes") : null,
+      s ? h("button", { class: "btn primary", onclick: () => exportEdited() }, "Download edited save") : null),
   );
 
   const banner = $("banner");
@@ -372,6 +392,40 @@ function renderTop() {
 
 function slotCount(b: C.Box) { return b.slots.filter(Boolean).length; }
 
+/** Phone navigation: three segments instead of the side rail. */
+function renderTabs() {
+  const s = st.save, el = $("tabs");
+  if (!s) { mount(el); return; }
+  const tab = (v: View, label: string, meta: string) =>
+    h("button", { class: `tab ${st.view === v ? "on" : ""}`, role: "tab", "aria-selected": st.view === v ? "true" : "false",
+      onclick: () => { st.view = v; st.sheet = false; st.moving = st.moving; renderAll(); } },
+      h("span", {}, label), h("small", {}, meta));
+  mount(el,
+    tab("trainer", "Trainer", s.trainer.name || "—"),
+    tab("party", "Party", `${s.party.length}/6`),
+    tab("box", "PC", `${s.boxes.reduce((a, b) => a + slotCount(b), 0)} stored`));
+}
+
+/** Phone action bar: save status and the download button within thumb reach. */
+function renderBottom() {
+  const s = st.save, el = $("bottombar");
+  if (!s) { el.hidden = true; return; }
+  el.hidden = false;
+  mount(el,
+    h("div", { class: "bbstatus" },
+      h("span", { class: `dotstate ${st.dirty ? "dirty" : "clean"}`, "aria-hidden": "true" }),
+      h("span", {}, st.dirty ? "Unsaved changes" : st.isDemo ? "Example save" : "No changes yet")),
+    h("button", { class: "btn primary", onclick: () => exportEdited() }, "Download .sav"));
+}
+
+function movingStrip() {
+  if (!st.moving) return null;
+  const m = st.moving.where === "party" ? st.save!.party[st.moving.i] : st.save!.boxes[st.moving.box].slots[st.moving.i];
+  return h("div", { class: "movestrip", role: "status" },
+    h("span", {}, "Moving ", h("strong", {}, m ? (m.nickname || C.speciesName(m.species)) : "Pokémon"), ". Tap a slot to put it there — any box or the party."),
+    h("button", { class: "btn small", onclick: () => { st.moving = null; renderAll(); } }, "Cancel"));
+}
+
 function renderNav() {
   const s = st.save;
   if (!s) { mount($("nav")); return; }
@@ -401,7 +455,12 @@ function slotTile(m: C.Pokemon | null, sel: NonNullable<Sel>, label: string) {
     class: `slot ${m ? "full" : "empty"} ${isSel ? "sel" : ""} ${warn.length ? "warned" : ""}`,
     title, "aria-label": m ? `${label}: ${C.speciesName(m.species)} level ${lvl ?? "unknown"}` : `${label}: empty`,
     "data-type": type, draggable: m ? "true" : undefined,
-    onclick: () => { st.sel = sel; st.armDelete = false; renderAll(); if (matchMedia("(max-width: 900px)").matches) $("side").scrollIntoView({ behavior: "smooth", block: "start" }); },
+    onclick: () => {
+      if (st.moving) { const from = st.moving; st.moving = null; swap(from, sel); return; }
+      st.sel = sel; st.armDelete = false;
+      if (isPhone() && (m || st.clip)) openSheet();
+      renderAll();
+    },
     ondragstart: (e: DragEvent) => { e.dataTransfer!.setData("text/plain", JSON.stringify(sel)); e.dataTransfer!.effectAllowed = "move"; },
     ondragover: (e: DragEvent) => { e.preventDefault(); (e.currentTarget as HTMLElement).classList.add("drop"); },
     ondragleave: (e: DragEvent) => (e.currentTarget as HTMLElement).classList.remove("drop"),
@@ -448,29 +507,37 @@ function renderMain() {
     const tiles = [];
     for (let i = 0; i < 6; i++) tiles.push(slotTile(s.party[i] ?? null, { where: "party", i }, `Party ${i + 1}`));
     mount(main,
-      h("div", { class: "viewhead" }, h("h2", {}, "Party"), h("span", { class: "muted" }, `${s.party.length} of 6 · drag to reorder or move to a box`)),
-      h("div", { class: "grid party" }, tiles));
+      movingStrip(),
+      h("div", { class: "viewhead" }, h("h2", {}, "Party"), h("span", { class: "muted" }, `${s.party.length} of 6 · tap to edit`)),
+      h("div", { class: "grid party" }, tiles),
+      h("div", { class: "phone-only" }, warningsPanel(s, null)));
     return;
   }
   const n = s.boxes.length;
   const b = s.boxes[st.box];
   mount(main,
-    h("div", { class: "viewhead" },
+    movingStrip(),
+    h("div", { class: "boxhead" },
       h("button", { class: "btn icon", "aria-label": "Previous box", onclick: () => { st.box = (st.box + n - 1) % n; renderAll(); } }, "‹"),
-      h("input", {
-        id: "boxName", class: "boxname", value: b.name, maxlength: 8, "aria-label": "Box name",
-        onchange: (e: Event) => {
-          const v = (e.target as HTMLInputElement).value;
-          const bad = C.unencodable(v);
-          if (bad.length) { toast(`The game can't show ${bad.join(" ")} in box names.`, "bad"); renderAll(); return; }
-          b.name = v; touch();
-        },
-      }),
-      h("button", { class: "btn icon", "aria-label": "Next box", onclick: () => { st.box = (st.box + 1) % n; renderAll(); } }, "›"),
-      h("span", { class: "muted" }, `Box ${st.box + 1} of ${n} · ${slotCount(b)}/30 · `),
-      select("wallSel", b.wallpaper, WALLPAPERS.map((w, i) => [i, `Wallpaper: ${w}`] as [number, string]).concat(b.wallpaper >= 16 ? [[b.wallpaper, `Wallpaper ${b.wallpaper}`]] : []),
-        v => { b.wallpaper = Number(v); touch(); }, { "aria-label": "Wallpaper", class: "compact" })),
-    h("div", { class: "grid box" }, b.slots.map((m, i) => slotTile(m, { where: "box", box: st.box, i }, `${b.name || `Box ${st.box + 1}`} slot ${i + 1}`))));
+      select("boxPick", st.box, s.boxes.map((bx, i) => [i, `${bx.name || `Box ${i + 1}`} · ${slotCount(bx)}/30`] as [number, string]),
+        v => { st.box = Number(v); renderAll(); }, { "aria-label": "Box", class: "boxpick" }),
+      h("button", { class: "btn icon", "aria-label": "Next box", onclick: () => { st.box = (st.box + 1) % n; renderAll(); } }, "›")),
+    h("div", { class: `grid box ${s.boxes.length > 14 ? "" : ""}` }, b.slots.map((m, i) => slotTile(m, { where: "box", box: st.box, i }, `${b.name || `Box ${st.box + 1}`} slot ${i + 1}`))),
+    h("details", { class: "boxsettings" },
+      h("summary", {}, `Box ${st.box + 1} of ${n} settings`),
+      h("div", { class: "fields cols2" },
+        field("Box name", "boxName", h("input", {
+          id: "boxName", value: b.name, maxlength: 8, autocomplete: "off",
+          onchange: (e: Event) => {
+            const v = (e.target as HTMLInputElement).value;
+            const bad = C.unencodable(v);
+            if (bad.length) { toast(`The game can't show ${bad.join(" ")} in box names.`, "bad"); renderAll(); return; }
+            b.name = v; touch();
+          },
+        }), "Up to 8 characters"),
+        field("Wallpaper", "wallSel", select("wallSel", b.wallpaper, WALLPAPERS.map((w, i) => [i, w] as [number, string]).concat(b.wallpaper >= 16 ? [[b.wallpaper, `Wallpaper ${b.wallpaper}`]] : []),
+          v => { b.wallpaper = Number(v); touch(); })))),
+    h("div", { class: "phone-only" }, warningsPanel(s, null)));
 }
 
 function trainerView(s: C.ParsedSave) {
@@ -493,7 +560,7 @@ function trainerView(s: C.ParsedSave) {
       h("div", { class: "fields cols3" },
         textField("tName", "Name", t.name, 7, v => { t.name = v; }),
         field("Gender", "tGender", select("tGender", t.gender, [[0, "Boy"], [1, "Girl"]], v => setT(() => { t.gender = Number(v); }))),
-        field("Play time", "tHours", h("div", { class: "row tight" },
+        field("Play time", "tHours", h("div", { class: "playtime" },
           num("tHours", t.playTime.h, 0, 999, v => setT(() => { t.playTime.h = v; }), { "aria-label": "Hours" }), h("span", {}, "h"),
           num("tMins", t.playTime.m, 0, 59, v => setT(() => { t.playTime.m = v; }), { "aria-label": "Minutes" }), h("span", {}, "m"))),
         field("Trainer ID", "tTid", num("tTid", t.tid, 0, 65535, v => setT(() => { t.tid = v; })), "Shown in game"),
@@ -532,16 +599,17 @@ function renderSide() {
   const m = getSel();
   const parts: Node[] = [];
   if (st.view !== "trainer") parts.push(m ? editor(m) : emptySlotPanel());
-  parts.push(warningsPanel(s, m));
+  parts.push(h("div", { class: "desktop-only" }, warningsPanel(s, m)));
   mount(side, ...parts);
 }
 
 function emptySlotPanel() {
   const sel = st.sel;
   return h("div", { class: "card editor" },
+    h("div", { class: "sheetbar phone-flex" }, h("span", {}, "Empty slot"), h("button", { class: "btn small", onclick: closeSheet }, "Close")),
     h("h3", {}, sel ? "Empty slot" : "Nothing selected"),
     h("p", { class: "muted" }, sel ? "This slot is empty. Paste a copied Pokémon here, or drag one in." : "Select a Pokémon to edit it."),
-    sel && st.clip ? h("button", { class: "btn primary", onclick: () => { setAt(sel, Object.assign(C.cloneMon(st.clip!), { dirty: true })); touch(); } }, `Paste ${C.speciesName(st.clip.species)}`) : null);
+    sel && st.clip ? h("button", { class: "btn primary", onclick: () => { setAt(sel, Object.assign(C.cloneMon(st.clip!), { dirty: true })); st.sheet = isPhone(); touch(); } }, `Paste ${C.speciesName(st.clip.species)}`) : null);
 }
 
 function editor(m: C.Pokemon) {
@@ -596,21 +664,28 @@ function editor(m: C.Pokemon) {
     ? select("mItem", m.heldItem, withCurrent(opts.items, m.heldItem, C.itemName(m.heldItem)), v => editMon(x => { x.heldItem = Number(v); }))
     : num("mItem", m.heldItem, 0, ci.maxItem, v => editMon(x => { x.heldItem = v; }));
 
+  const tabBtn = (k: typeof st.edTab, label: string) =>
+    h("button", { class: `edtab ${st.edTab === k ? "on" : ""}`, role: "tab", "aria-selected": st.edTab === k ? "true" : "false", onclick: () => { st.edTab = k; renderAll(); } }, label);
   return h("div", { class: "card editor" },
+    h("div", { class: "sheetbar phone-flex" },
+      h("span", { class: "grab", "aria-hidden": "true" }),
+      h("button", { class: "btn small", onclick: closeSheet }, "Done")),
     h("div", { class: "edhead", "data-type": info?.t?.[0] ?? "Normal" },
-      h("div", {},
+      h("div", { class: "edid" },
         h("div", { class: "edtitle" }, m.nickname || C.speciesName(m.species), C.isShiny(m) ? h("span", { class: "shiny" }, " ★") : null),
         h("div", { class: "muted" }, `${speciesLabel(m.species)} · Lv ${lvl ?? "?"} · ${g === "-" ? "Genderless" : g === "M" ? "♂" : "♀"}${info?.t ? ` · ${info.t.join("/")}` : ""}`)),
-      h("div", { class: "row tight" },
-        h("button", { class: "btn small", onclick: () => { st.clip = C.cloneMon(m); toast(`Copied ${C.speciesName(m.species)}.`, ""); renderAll(); } }, "Copy"),
+      h("div", { class: "row tight edactions" },
+        h("button", { class: "btn small", onclick: () => { st.moving = sel; st.sheet = false; renderAll(); } }, "Move"),
+        h("button", { class: "btn small", onclick: () => { st.clip = C.cloneMon(m); toast(`Copied ${C.speciesName(m.species)}. Tap an empty slot to paste.`, ""); renderAll(); } }, "Copy"),
         st.clip ? h("button", { class: "btn small", onclick: () => { setAt(sel, Object.assign(C.cloneMon(st.clip!), { dirty: true })); touch(); } }, "Paste") : null,
         st.armDelete
           ? h("button", { class: "btn small danger", onclick: () => {
               if (sel.where === "party" && st.save!.party.length === 1) { toast("Keep at least one Pokémon in the party.", "bad"); return; }
-              setAt(sel, null); st.armDelete = false; if (sel.where === "party") st.sel = null; touch(); } }, "Confirm delete")
+              setAt(sel, null); st.armDelete = false; st.sheet = false; if (sel.where === "party") st.sel = null; touch(); } }, "Confirm delete")
           : h("button", { class: "btn small", onclick: () => { st.armDelete = true; renderAll(); } }, "Delete"))),
+    h("div", { class: "edtabs", role: "tablist" }, tabBtn("info", "Info"), tabBtn("moves", "Moves"), tabBtn("stats", "Stats"), tabBtn("ot", "Trainer")),
 
-    section("Identity",
+    st.edTab !== "info" ? null : section("Identity",
       h("div", { class: "fields cols2" },
         field("Species", "mSpecies", select("mSpecies", m.species, withCurrent(opts.species, m.species, `Unknown (${m.species})`), v => {
           const ns = Number(v);
@@ -651,7 +726,7 @@ function editor(m: C.Pokemon) {
           : "In Gen III, nature, gender and shininess all come from one personality value, so changing any of them picks a new one and keeps the other two."),
     ),
 
-    section("Moves",
+    st.edTab !== "moves" ? null : section("Moves",
       h("div", { class: "moves" }, [0, 1, 2, 3].map(i => {
         const max = C.maxPP(m.moves[i], m.ppBonuses, i);
         return h("div", { class: "moverow" },
@@ -667,7 +742,7 @@ function editor(m: C.Pokemon) {
         ? h("button", { class: "btn small", onclick: () => editMon(x => { x.pp = x.moves.map((mv, i) => C.maxPP(mv, x.ppBonuses, i)); }) }, "Restore all PP")
         : h("p", { class: "note" }, "CFRU doesn't store PP for Pokémon in the PC; it's restored when you withdraw them.")),
 
-    section("Stats",
+    st.edTab !== "stats" ? null : section("Stats",
       h("div", { class: "stats" },
         h("div", { class: "statrow head" }, h("span", {}), h("span", {}, "IV"), h("span", {}, "EV"), h("span", {}, "Stat")),
         STAT_LABELS.map((lab, i) => h("div", { class: "statrow" },
@@ -680,7 +755,7 @@ function editor(m: C.Pokemon) {
         h("button", { class: "btn small", onclick: () => editMon(x => { x.ivs = [31, 31, 31, 31, 31, 31]; }) }, "Max IVs"),
         h("button", { class: "btn small", onclick: () => editMon(x => { x.evs = [0, 0, 0, 0, 0, 0]; }) }, "Clear EVs"))),
 
-    section("Trainer & extras",
+    st.edTab !== "ot" ? null : section("Trainer & extras",
       h("div", { class: "fields cols2" },
         nameInput("mOt", "OT name", m.otName, 7, v => { m.otName = v; }),
         field("Friendship", "mFriend", num("mFriend", m.friendship, 0, 255, v => editMon(x => { x.friendship = v; })), "Max 255"),
@@ -702,8 +777,8 @@ function editor(m: C.Pokemon) {
   );
 }
 
-function section(title: string, ...body: Node[]) {
-  return h("details", { class: "sec", open: true }, h("summary", {}, title), h("div", { class: "secbody" }, body));
+function section(_title: string, ...body: Node[]) {
+  return h("div", { class: "secbody", role: "tabpanel" }, body);
 }
 
 function warningsPanel(s: C.ParsedSave, m: C.Pokemon | null) {
@@ -741,6 +816,9 @@ function boot() {
     const f = e.dataTransfer?.files?.[0];
     if (f) { e.preventDefault(); openFile(f); }
   });
+  $("scrim").addEventListener("click", () => closeSheet());
+  document.addEventListener("keydown", e => { if (e.key === "Escape" && (st.sheet || st.moving)) { st.moving = null; closeSheet(); } });
+  matchMedia("(max-width: 900px)").addEventListener?.("change", () => renderAll());
   window.addEventListener("beforeunload", e => { if (st.dirty && !st.isDemo) { e.preventDefault(); e.returnValue = ""; } });
   loadBytes(demoSave(), "example-emerald.sav", true);
 }
