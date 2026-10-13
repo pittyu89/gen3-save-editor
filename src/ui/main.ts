@@ -1,0 +1,748 @@
+import * as C from "../core";
+import { buildSave, makeMon } from "../core/fixtures";
+import { h, mount, select, num, field } from "./dom";
+
+type Sel = { where: "party"; i: number } | { where: "box"; box: number; i: number } | null;
+type View = "trainer" | "party" | "box";
+
+const st = {
+  save: null as C.ParsedSave | null,
+  detected: null as C.DetectResult | null,
+  fileName: "",
+  isDemo: false,
+  view: "party" as View,
+  box: 0,
+  sel: null as Sel,
+  dirty: false,
+  clip: null as C.Pokemon | null,
+  armDelete: false,
+  confirmExport: null as string[] | null,
+  error: "",
+  rom: null as { data: C.GameData; header: C.RomHeader; report: string[]; fileName: string } | null,
+  busy: "",
+};
+
+const $ = (id: string) => document.getElementById(id)!;
+
+// ---------- Data ----------
+
+const ROM_FAMILY: Record<string, C.Family> = { AXVE: "RS", AXPE: "RS", BPEE: "E", BPRE: "FRLG", BPGE: "FRLG" };
+/** The loaded ROM's data when it belongs to the same game family as the profile; otherwise built-in data. */
+function romFits(p: C.GameProfile) {
+  if (!st.rom) return false;
+  const fam = ROM_FAMILY[st.rom.header.code.slice(0, 3) + "E"] ?? ROM_FAMILY[st.rom.header.code];
+  return !fam || fam === p.family;
+}
+function dataFor(p: C.GameProfile): C.GameData { return st.rom && romFits(p) ? st.rom.data : C.fallbackDataFor(p); }
+
+const STAT_LABELS = ["HP", "Atk", "Def", "Spe", "SpA", "SpD"];
+const MARKS = ["●", "■", "▲", "♥"];
+const WALLPAPERS = ["Forest", "City", "Desert", "Savanna", "Crag", "Volcano", "Snow", "Cave", "Beach", "Seafloor", "River", "Sky", "Polka-dot", "PokéCenter", "Machine", "Simple"];
+
+function pad3(n: number) { return String(n).padStart(3, "0"); }
+function pad5(n: number) { return String(n).padStart(5, "0"); }
+
+/** Number shown before a species name: National Dex for vanilla data, the game's own index otherwise. */
+function dexNo(s: number): string {
+  const d = C.data(), p = st.save?.profile;
+  if (d.source === "builtin" && d.nat[s]) return `#${pad3(d.nat[s])}`;
+  if (p && (p.engine === "pex-modern" || p.engine === "pex-legacy") && s <= 1025) return `#${pad3(s)}`;
+  return `No. ${s}`;
+}
+const speciesLabel = (s: number) => `${dexNo(s)} ${C.speciesName(s)}`;
+const defaultName = (s: number) => C.speciesName(s).toUpperCase();
+
+let optCache: { key: string; species: [number, string][]; items: [number, string][]; moves: [number, string][] } | null = null;
+function options() {
+  const d = C.data(), key = d.id + (st.save?.profile.id ?? "");
+  if (optCache?.key === key) return optCache;
+  const species: [number, string][] = [];
+  for (let i = 1; i < d.species.length; i++) if (C.isValidSpecies(i)) species.push([i, speciesLabel(i)]);
+  if (d.source === "builtin" && d.id === "gen3") species.sort((a, b) => d.nat[a[0]] - d.nat[b[0]]);
+  const items: [number, string][] = d.items.map((n, i) => [i, i === 0 ? "None" : n] as [number, string]).filter(([i, n]) => i === 0 || n);
+  const moves: [number, string][] = d.moves.map((_, i) => [i, C.moveName(i)] as [number, string]).filter(([i]) => i === 0 || (d.moves[i] && !/^\?+$/.test(d.moves[i])));
+  optCache = { key, species, items, moves };
+  return optCache;
+}
+const withCurrent = (opts: [number, string][], v: number, label: string): [number, string][] =>
+  opts.some(o => o[0] === v) ? opts : [[v, label], ...opts];
+
+// ---------- Selection ----------
+
+function getSel(): C.Pokemon | null {
+  const s = st.save, sel = st.sel;
+  if (!s || !sel) return null;
+  return sel.where === "party" ? s.party[sel.i] ?? null : s.boxes[sel.box]?.slots[sel.i] ?? null;
+}
+const codecAt = (sel: NonNullable<Sel>): C.CodecId => (sel.where === "party" ? st.save!.profile.partyCodec : st.save!.profile.boxCodec);
+
+function setAt(sel: NonNullable<Sel>, m: C.Pokemon | null) {
+  const s = st.save!;
+  if (sel.where === "party") {
+    if (m) {
+      if (!m.party) C.toParty(m);
+      if (sel.i < s.party.length) s.party[sel.i] = m; else s.party.push(m);
+    } else s.party.splice(sel.i, 1);
+  } else {
+    if (m) m.party = undefined;
+    s.boxes[sel.box].slots[sel.i] = m;
+  }
+}
+
+function touch() { st.dirty = true; st.confirmExport = null; renderAll(); }
+
+function editMon(fn: (m: C.Pokemon) => void) {
+  const m = getSel();
+  if (!m) return;
+  fn(m);
+  m.dirty = true;
+  C.refreshParty(m);
+  touch();
+}
+
+// ---------- Loading ----------
+
+const ARTIFACT_URL = "https://claude.ai/artifact/69Jw6VbYCG4vZT4cKpJ3ix";
+// Only inside the Claude app (embedded frame) can file pickers be blocked; a normal browser tab is fine.
+const IS_ANDROID_APP = /Android/i.test(navigator.userAgent) && (window.top !== window.self || !!(window as any).claude);
+
+/**
+ * A button whose tap lands directly on a real file input stretched over it. Some in-app
+ * browsers ignore script-triggered pickers, so the input itself has to receive the tap.
+ */
+function fileButton(label: string, cls: string, kind: "save" | "rom", attrs: Record<string, unknown> = {}) {
+  const input = h("input", {
+    type: "file", class: "fileoverlay", "aria-label": label,
+    onchange: async (e: Event) => {
+      const inp = e.target as HTMLInputElement;
+      const f = inp.files?.[0];
+      inp.value = "";
+      if (!f) return;
+      if (kind === "save") { openFile(f); return; }
+      try { await loadRom(await readFile(f), f.name); } catch (err) { toast(`Couldn't read ${f.name}: ${(err as Error)?.message ?? "unknown error"}`, "bad"); }
+    },
+  });
+  return h("label", { class: `${cls} filebtn`, ...attrs }, h("span", {}, label), input);
+}
+
+function readFile(file: File): Promise<Uint8Array> {
+  if (file.arrayBuffer) return file.arrayBuffer().then(b => new Uint8Array(b));
+  return new Promise((res, rej) => { const fr = new FileReader(); fr.onload = () => res(new Uint8Array(fr.result as ArrayBuffer)); fr.onerror = () => rej(fr.error); fr.readAsArrayBuffer(file); });
+}
+
+async function openFile(file: File) {
+  let buf: Uint8Array;
+  try { buf = await readFile(file); } catch (e) { toast(`Couldn't read ${file.name}: ${(e as Error)?.message ?? "unknown error"}`, "bad"); return; }
+  if (buf.length > 0x40000 && buf[0xb2] === 0x96) { await loadRom(buf, file.name); return; }
+  loadBytes(buf, file.name, false);
+}
+
+function loadBytes(buf: Uint8Array, name: string, demo: boolean, profileId?: string, slot?: 0 | 1) {
+  st.error = "";
+  try {
+    const det = C.detect(buf, dataFor);
+    if (!det.ok) { st.error = det.messages.join(" "); renderAll(); return; }
+    st.detected = det;
+    const profile = C.getProfile(profileId ?? det.suggestedProfile!);
+    C.setData(dataFor(profile));
+    st.save = C.parse(buf, profile, slot);
+    st.fileName = name; st.isDemo = demo; st.dirty = false; st.view = "party";
+    st.box = st.save.currentBox;
+    st.sel = st.save.party.length ? { where: "party", i: 0 } : null;
+    st.confirmExport = null;
+  } catch (e) {
+    st.error = `This file could not be opened: ${(e as Error).message}`;
+  }
+  renderAll();
+}
+
+/** Re-reads the current save (with its edits) using another profile, slot or data set. */
+function reparse(profileId: string, slot?: 0 | 1) {
+  const s = st.save!;
+  const bytes = st.dirty ? C.write(s) : s.bytes;
+  const keepDirty = st.dirty, original = s.original, sel = st.sel, view = st.view, box = st.box, detected = st.detected;
+  loadBytes(bytes, st.fileName, st.isDemo, profileId, slot ?? s.slot.index);
+  if (st.save) {
+    st.save.original = original; st.dirty = keepDirty; st.detected = detected;
+    st.view = view; st.box = Math.min(box, st.save.boxes.length - 1);
+    st.sel = sel && (sel.where === "party" || sel.box < st.save.boxes.length) ? sel : null;
+  }
+  renderAll();
+}
+
+async function loadRom(buf: Uint8Array, name: string) {
+  st.busy = "Reading ROM tables…"; renderAll();
+  await new Promise(r => setTimeout(r, 30));
+  try {
+    const res = C.loadRomData(buf);
+    st.rom = { ...res, fileName: name };
+    optCache = null;
+    toast(`Loaded ${res.data.species.length - 1} species, ${res.data.moves.length - 1} moves and ${res.data.items.length - 1} items from ${res.header.title || name}.`, "good");
+    if (st.save) {
+      // re-rank engines with the ROM's tables, then reopen with the best one
+      const bytes = st.dirty ? C.write(st.save) : st.save.bytes;
+      const det = C.detect(bytes, dataFor);
+      const keep = st.save.profile.id;
+      const best = det.ok ? det.suggestedProfile! : keep;
+      reparse(best);
+      st.detected = det;
+    }
+  } catch (e) {
+    toast(`Couldn't read that ROM: ${(e as Error).message}`, "bad");
+  }
+  st.busy = "";
+  renderAll();
+}
+
+function demoSave(): Uint8Array {
+  const profile = C.getProfile("emerald-us");
+  C.setData(C.VANILLA);
+  const mk = (sp: number, lvl: number, o: Partial<C.Pokemon> = {}) =>
+    makeMon(sp, lvl, { nickname: defaultName(sp), otName: "MAY", pid: (Math.random() * 2 ** 32) >>> 0, ...o });
+  const party = [
+    mk(282, 52, { moves: [299, 280, 332, 7], pp: [10, 15, 20, 15], heldItem: 215, nickname: "BLAZE" }),
+    mk(329, 44, { moves: [57, 58, 105, 352], pp: [15, 10, 10, 20], heldItem: 200 }),
+    mk(394, 41, { moves: [94, 85, 104, 105], pp: [10, 15, 15, 10] }),
+    mk(397, 50, { moves: [337, 89, 53, 349], pp: [15, 10, 15, 20], heldItem: 186 }),
+  ];
+  const boxMons = [286, 288, 290, 25, 304, 309, 333, 371, 374, 376, 383].map((sp, i) =>
+    ({ box: 0, slot: i, mon: mk(sp, 8 + i * 3, { moves: [33, 45, 0, 0], pp: [35, 40, 0, 0] }) }));
+  boxMons.push({ box: 1, slot: 0, mon: mk(150, 70, { moves: [94, 105, 248, 54], pp: [10, 10, 10, 30] }) });
+  boxMons.push({ box: 1, slot: 7, mon: mk(380, 30, { moves: [163, 0, 0, 0], pp: [20, 0, 0, 0] }) });
+  const shiny = mk(129, 20, { moves: [150, 33, 175, 0], pp: [40, 35, 15, 0] });
+  shiny.pid = C.rerollPid(shiny, { shiny: true }) ?? shiny.pid;
+  boxMons.push({ box: 0, slot: 14, mon: shiny });
+  return buildSave({ profile, name: "MAY", money: 48210, key: 0x3c91a7e5, party, boxMons, rotate: 3, counterA: 211, counterB: 210 });
+}
+
+// ---------- Export ----------
+
+let downloadsCap: Promise<any> | null = null;
+function getDownloads(): Promise<any> {
+  const claude = (window as any).claude;
+  if (!claude?.use) return Promise.resolve(null);
+  downloadsCap ??= claude.use("downloads").catch(() => null);
+  return downloadsCap!;
+}
+
+function baseName() { return (st.fileName || "pokemon").replace(/\.(sav|srm|bin|fla)$/i, ""); }
+
+function exportProblems(): string[] {
+  const s = st.save!, out: string[] = [];
+  if (s.fit.records >= 3 && s.fit.score < 0.75)
+    out.push(`Only ${s.fit.plausible} of ${s.fit.records} Pokémon read cleanly with ${s.profile.name}. Writing with the wrong layout can corrupt the save.`);
+  s.party.forEach((m, i) => { const w = C.validatePokemon(m, s.profile.partyCodec); if (w.length && m.dirty) out.push(`Party ${i + 1} (${C.speciesName(m.species)}): ${w[0]}`); });
+  s.boxes.forEach((b, bi) => b.slots.forEach((m, i) => {
+    if (!m || !m.dirty) return;
+    const w = C.validatePokemon(m, s.profile.boxCodec);
+    if (w.length) out.push(`${b.name || `Box ${bi + 1}`} slot ${i + 1} (${C.speciesName(m.species)}): ${w[0]}`);
+  }));
+  if (!s.party.length) out.push("The party is empty. The game expects at least one Pokémon in the party.");
+  return out;
+}
+
+async function exportEdited(force = false) {
+  const s = st.save!;
+  if (!force) {
+    const w = exportProblems();
+    if (w.length) { st.confirmExport = w; renderAll(); return; }
+  }
+  st.confirmExport = null;
+  let out: Uint8Array;
+  try { out = C.write(s); } catch (e) { toast(`Export failed: ${(e as Error).message}`, "bad"); return; }
+  const problems = C.verify(out, s.slot.index, s.profile);
+  if (problems.length) { toast(`Export stopped: ${problems.join(" ")}`, "bad"); return; }
+  const ok = await deliver(out, `${baseName()}-edited.sav`);
+  if (ok) {
+    const sel = st.sel, view = st.view, box = st.box, original = s.original;
+    st.save = C.parse(out, s.profile, s.slot.index);
+    st.save.original = original;
+    st.dirty = false; st.sel = sel; st.view = view; st.box = box;
+    renderAll();
+  }
+}
+
+async function exportBackup() { await deliver(st.save!.original.slice(), `${baseName()}-backup.sav`); }
+
+async function deliver(bytes: Uint8Array, filename: string): Promise<boolean> {
+  const dl = await getDownloads();
+  if (dl) {
+    try {
+      const zip = C.zipStore([{ name: filename, data: bytes }]);
+      await dl.save({ filename: filename.replace(/\.sav$/, ".zip"), data: new Blob([zip]) });
+      toast(`Saved ${filename.replace(/\.sav$/, ".zip")}. Unzip it to get ${filename}.`, "good");
+      return true;
+    } catch (e: any) {
+      if (e?.code === "declined") { toast("Download cancelled.", ""); return false; }
+      if (e?.code === "rate_limited") { toast("A download prompt is already open.", ""); return false; }
+    }
+  }
+  const picker = (window as any).showSaveFilePicker;
+  if (picker && window.top === window.self) {
+    try {
+      const handle = await picker({ suggestedName: filename, types: [{ description: "GBA save", accept: { "application/octet-stream": [".sav"] } }] });
+      const w = await handle.createWritable(); await w.write(bytes); await w.close();
+      toast(`Saved ${filename}.`, "good");
+      return true;
+    } catch (e: any) {
+      if (e?.name === "AbortError") return false;
+    }
+  }
+  try {
+    const url = URL.createObjectURL(new Blob([bytes], { type: "application/octet-stream" }));
+    const a = h("a", { href: url, download: filename });
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast(`Downloading ${filename}.`, "good");
+    return true;
+  } catch {
+    toast("This view cannot start downloads. Open the editor as a standalone page to save files.", "bad");
+    return false;
+  }
+}
+
+// ---------- Toasts ----------
+
+let toastTimer = 0;
+function toast(msg: string, tone: "good" | "bad" | "") {
+  const t = $("toast");
+  t.textContent = msg; t.className = `toast ${tone}`; t.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => { t.hidden = true; }, 6000);
+}
+
+// ---------- Rendering ----------
+
+function renderAll() {
+  renderTop();
+  renderNav();
+  renderMain();
+  renderSide();
+}
+
+function renderTop() {
+  const s = st.save;
+  const slotChip = s ? h("div", { class: "slotinfo" },
+    s.slots.filter(x => x.complete).length > 1
+      ? select("slotSel", s.slot.index, s.slots.filter(x => x.complete).map(x => [x.index, `Slot ${x.index === 0 ? "A" : "B"} · save no. ${x.counter}${x.valid ? "" : " · damaged"}`]),
+          v => reparse(s.profile.id, Number(v) as 0 | 1), { "aria-label": "Save slot" })
+      : h("span", {}, `Slot ${s.slot.index === 0 ? "A" : "B"} · save no. ${s.slot.counter}`),
+    h("span", { class: `pill ${s.slot.valid ? "ok" : "bad"}` }, s.slot.valid ? "Checksums OK" : "Checksum errors")) : null;
+
+  mount($("topActions"),
+    fileButton("Open save", "btn primary", "save"),
+    s ? select("gameSel", s.profile.id, C.PROFILES.map(p => [p.id, p.name]), v => reparse(v), { "aria-label": "Game or engine" }) : null,
+    fileButton(st.rom ? "ROM loaded" : "Load ROM", "btn", "rom", { title: "Optional: read species, move and item names from your ROM" }),
+    slotChip,
+    h("span", { class: "spacer" }),
+    st.busy ? h("span", { class: "pill warn" }, st.busy) : null,
+    s && st.dirty ? h("span", { class: "pill warn", title: "Edits are not saved to a file yet" }, "Unsaved changes") : null,
+    s ? h("button", { class: "btn primary", onclick: () => exportEdited() }, "Download edited save") : null,
+    s ? h("button", { class: "btn", onclick: exportBackup }, "Download original") : null,
+  );
+
+  const banner = $("banner");
+  const hackNoRom = s && s.profile.engine !== "vanilla" && !(st.rom && romFits(s.profile));
+  const romMismatch = s && st.rom && !romFits(s.profile);
+  if (st.error) {
+    banner.hidden = false; banner.className = "banner bad";
+    mount(banner, h("strong", {}, "Couldn't open that file. "), st.error);
+  } else if (st.confirmExport) {
+    banner.hidden = false; banner.className = "banner warn";
+    mount(banner,
+      h("div", {}, h("strong", {}, `${st.confirmExport.length} problem${st.confirmExport.length > 1 ? "s" : ""} found. `), "The game may reject or misread this save."),
+      h("ul", {}, st.confirmExport.slice(0, 5).map(w => h("li", {}, w))),
+      h("div", { class: "row" },
+        h("button", { class: "btn primary", onclick: () => exportEdited(true) }, "Export anyway"),
+        h("button", { class: "btn", onclick: () => { st.confirmExport = null; renderAll(); } }, "Go back")));
+  } else if (st.isDemo) {
+    banner.hidden = false; banner.className = "banner";
+    mount(banner, h("strong", {}, "Example save. "), "This is a generated Emerald save so you can try the editor. Open your own .sav to edit it; files never leave this device.");
+  } else if (romMismatch) {
+    banner.hidden = false; banner.className = "banner warn";
+    mount(banner, h("strong", {}, "ROM not used. "), `The loaded ROM (${st.rom!.header.code}) is for a different game than this save, so built-in names are shown. `,
+      fileButton("Load the matching ROM", "linkish", "rom"), ".");
+  } else if (hackNoRom) {
+    banner.hidden = false; banner.className = "banner";
+    mount(banner, h("strong", {}, `${s!.profile.short} save. `),
+      "Names and stats shown are Gen III defaults and may not match this hack. ",
+      fileButton("Load the hack's ROM", "linkish", "rom"), " to read its own species, moves, items and abilities. The ROM stays on this device.");
+  } else banner.hidden = true;
+}
+
+function slotCount(b: C.Box) { return b.slots.filter(Boolean).length; }
+
+function renderNav() {
+  const s = st.save;
+  if (!s) { mount($("nav")); return; }
+  const t = s.trainer;
+  mount($("nav"),
+    h("button", { class: `navitem ${st.view === "trainer" ? "on" : ""}`, onclick: () => { st.view = "trainer"; renderAll(); } },
+      h("span", { class: "navlabel" }, "Trainer"),
+      h("span", { class: "navmeta" }, `${t.name} · ID ${pad5(t.tid)}`)),
+    h("button", { class: `navitem ${st.view === "party" ? "on" : ""}`, onclick: () => { st.view = "party"; renderAll(); } },
+      h("span", { class: "navlabel" }, "Party"),
+      h("span", { class: "navmeta" }, `${s.party.length}/6`)),
+    h("div", { class: "navhead" }, `PC boxes · ${s.boxes.length}`),
+    h("div", { class: "boxlist" }, s.boxes.map((b, i) =>
+      h("button", { class: `navitem box ${st.view === "box" && st.box === i ? "on" : ""}`, onclick: () => { st.view = "box"; st.box = i; renderAll(); } },
+        h("span", { class: "navlabel" }, b.name || `Box ${i + 1}`),
+        h("span", { class: "navmeta" }, `${slotCount(b)}/30`)))),
+  );
+}
+
+function slotTile(m: C.Pokemon | null, sel: NonNullable<Sel>, label: string) {
+  const isSel = st.sel && st.sel.where === sel.where && st.sel.i === sel.i && (sel.where === "party" || (st.sel as any).box === (sel as any).box);
+  const warn = m ? C.validatePokemon(m, codecAt(sel)) : [];
+  const type = m ? C.data().info[m.species]?.t?.[0] ?? "Normal" : "";
+  const lvl = m ? C.levelOf(m) : null;
+  const title = !m ? `${label}: empty` : warn.length ? `${label}: ${warn.join(" ")}` : label;
+  return h("button", {
+    class: `slot ${m ? "full" : "empty"} ${isSel ? "sel" : ""} ${warn.length ? "warned" : ""}`,
+    title, "aria-label": m ? `${label}: ${C.speciesName(m.species)} level ${lvl ?? "unknown"}` : `${label}: empty`,
+    "data-type": type, draggable: m ? "true" : undefined,
+    onclick: () => { st.sel = sel; st.armDelete = false; renderAll(); if (matchMedia("(max-width: 900px)").matches) $("side").scrollIntoView({ behavior: "smooth", block: "start" }); },
+    ondragstart: (e: DragEvent) => { e.dataTransfer!.setData("text/plain", JSON.stringify(sel)); e.dataTransfer!.effectAllowed = "move"; },
+    ondragover: (e: DragEvent) => { e.preventDefault(); (e.currentTarget as HTMLElement).classList.add("drop"); },
+    ondragleave: (e: DragEvent) => (e.currentTarget as HTMLElement).classList.remove("drop"),
+    ondrop: (e: DragEvent) => { e.preventDefault(); try { swap(JSON.parse(e.dataTransfer!.getData("text/plain")), sel); } catch { /* ignore */ } },
+  },
+    m ? [
+      h("span", { class: "dex" }, m.isEgg ? "Egg" : dexNo(m.species)),
+      h("span", { class: "sp" }, m.isEgg ? "Egg" : C.speciesName(m.species)),
+      h("span", { class: "lv" }, `Lv ${lvl ?? "?"}`, C.isShiny(m) ? h("span", { class: "shiny", title: "Shiny" }, " ★") : null),
+      warn.length ? h("span", { class: "dot", "aria-hidden": "true" }) : null,
+    ] : h("span", { class: "emptylabel" }, "Empty"));
+}
+
+function swap(from: NonNullable<Sel>, to: NonNullable<Sel>) {
+  const s = st.save!;
+  const get = (x: NonNullable<Sel>) => x.where === "party" ? s.party[x.i] ?? null : s.boxes[x.box].slots[x.i];
+  const a = get(from), b = get(to);
+  if (!a || (from.where === to.where && from.i === to.i && (from as any).box === (to as any).box)) return;
+  if (from.where === "party" && !b && to.where !== "party" && s.party.length === 1) { toast("Keep at least one Pokémon in the party.", "bad"); return; }
+  a.dirty = true; if (b) b.dirty = true;
+  if (from.where === "party" && to.where === "party") {
+    const bi = Math.min(to.i, s.party.length - 1);
+    [s.party[from.i], s.party[bi]] = [s.party[bi], s.party[from.i]];
+    st.sel = { where: "party", i: bi };
+  } else if (from.where === "party") {
+    if (b) { C.toParty(b); s.party[from.i] = b; } else s.party.splice(from.i, 1);
+    a.party = undefined; s.boxes[(to as any).box].slots[to.i] = a;
+    st.sel = to;
+  } else if (to.where === "party") {
+    C.toParty(a);
+    if (b) { b.party = undefined; s.boxes[from.box].slots[from.i] = b; s.party[to.i] = a; st.sel = to; }
+    else { s.boxes[from.box].slots[from.i] = null; s.party.push(a); st.sel = { where: "party", i: s.party.length - 1 }; }
+  } else {
+    s.boxes[from.box].slots[from.i] = b; s.boxes[to.box].slots[to.i] = a; st.sel = to;
+  }
+  touch();
+}
+
+function renderMain() {
+  const s = st.save, main = $("main");
+  if (!s) { mount(main, h("div", { class: "emptystate" }, h("h2", {}, "Open a Gen III save"), h("p", {}, "Choose a 128 KB .sav file from Ruby, Sapphire, Emerald, FireRed, LeafGreen, or a pokeemerald-expansion or CFRU hack."))); return; }
+  if (st.view === "trainer") return mount(main, trainerView(s));
+  if (st.view === "party") {
+    const tiles = [];
+    for (let i = 0; i < 6; i++) tiles.push(slotTile(s.party[i] ?? null, { where: "party", i }, `Party ${i + 1}`));
+    mount(main,
+      h("div", { class: "viewhead" }, h("h2", {}, "Party"), h("span", { class: "muted" }, `${s.party.length} of 6 · drag to reorder or move to a box`)),
+      h("div", { class: "grid party" }, tiles));
+    return;
+  }
+  const n = s.boxes.length;
+  const b = s.boxes[st.box];
+  mount(main,
+    h("div", { class: "viewhead" },
+      h("button", { class: "btn icon", "aria-label": "Previous box", onclick: () => { st.box = (st.box + n - 1) % n; renderAll(); } }, "‹"),
+      h("input", {
+        id: "boxName", class: "boxname", value: b.name, maxlength: 8, "aria-label": "Box name",
+        onchange: (e: Event) => {
+          const v = (e.target as HTMLInputElement).value;
+          const bad = C.unencodable(v);
+          if (bad.length) { toast(`The game can't show ${bad.join(" ")} in box names.`, "bad"); renderAll(); return; }
+          b.name = v; touch();
+        },
+      }),
+      h("button", { class: "btn icon", "aria-label": "Next box", onclick: () => { st.box = (st.box + 1) % n; renderAll(); } }, "›"),
+      h("span", { class: "muted" }, `Box ${st.box + 1} of ${n} · ${slotCount(b)}/30 · `),
+      select("wallSel", b.wallpaper, WALLPAPERS.map((w, i) => [i, `Wallpaper: ${w}`] as [number, string]).concat(b.wallpaper >= 16 ? [[b.wallpaper, `Wallpaper ${b.wallpaper}`]] : []),
+        v => { b.wallpaper = Number(v); touch(); }, { "aria-label": "Wallpaper", class: "compact" })),
+    h("div", { class: "grid box" }, b.slots.map((m, i) => slotTile(m, { where: "box", box: st.box, i }, `${b.name || `Box ${st.box + 1}`} slot ${i + 1}`))));
+}
+
+function trainerView(s: C.ParsedSave) {
+  const t = s.trainer;
+  const setT = (fn: () => void) => { fn(); touch(); };
+  const textField = (id: string, label: string, val: string, max: number, set: (v: string) => void) =>
+    field(label, id, h("input", {
+      id, value: val, maxlength: max, autocomplete: "off",
+      onchange: (e: Event) => {
+        const v = (e.target as HTMLInputElement).value;
+        const bad = C.unencodable(v);
+        if (bad.length) { toast(`The game can't show ${bad.join(" ")}.`, "bad"); renderAll(); return; }
+        setT(() => set(v));
+      },
+    }), `Up to ${max} characters`);
+  const det = st.detected;
+  return h("div", { class: "trainer" },
+    h("div", { class: "viewhead" }, h("h2", {}, "Trainer"), h("span", { class: "muted" }, s.profile.name)),
+    h("div", { class: "card" },
+      h("div", { class: "fields cols3" },
+        textField("tName", "Name", t.name, 7, v => { t.name = v; }),
+        field("Gender", "tGender", select("tGender", t.gender, [[0, "Boy"], [1, "Girl"]], v => setT(() => { t.gender = Number(v); }))),
+        field("Play time", "tHours", h("div", { class: "row tight" },
+          num("tHours", t.playTime.h, 0, 999, v => setT(() => { t.playTime.h = v; }), { "aria-label": "Hours" }), h("span", {}, "h"),
+          num("tMins", t.playTime.m, 0, 59, v => setT(() => { t.playTime.m = v; }), { "aria-label": "Minutes" }), h("span", {}, "m"))),
+        field("Trainer ID", "tTid", num("tTid", t.tid, 0, 65535, v => setT(() => { t.tid = v; })), "Shown in game"),
+        field("Secret ID", "tSid", num("tSid", t.sid, 0, 65535, v => setT(() => { t.sid = v; })), "Hidden; affects shininess"),
+        h("div", {}),
+        field("Money (¥)", "tMoney", num("tMoney", t.money, 0, 999999, v => setT(() => { t.money = v; })), "0 – 999,999"),
+        field("Game Corner coins", "tCoins", num("tCoins", t.coins, 0, 9999, v => setT(() => { t.coins = v; })), "0 – 9,999"),
+        t.battlePoints !== null
+          ? field("Battle Points", "tBp", num("tBp", t.battlePoints, 0, 9999, v => setT(() => { t.battlePoints = v; })), "Battle Frontier")
+          : null,
+      ),
+      h("p", { class: "note" }, "Changing your Trainer ID or Secret ID does not change the OT ID stored on your Pokémon. Pokémon you caught will then count as traded and may disobey."),
+    ),
+    h("div", { class: "card" },
+      h("h3", {}, "Save layout"),
+      det && det.ranking.length > 1 ? h("div", { class: "fits" }, det.ranking.map(r =>
+        h("div", { class: `fitrow ${r.id === s.profile.id || (C.getProfile(r.id).engine === s.profile.engine && C.getProfile(r.id).family === s.profile.family) ? "on" : ""}` },
+          h("span", {}, r.name),
+          h("span", { class: "fitbar", "aria-hidden": "true" }, h("span", { style: { width: `${Math.round(r.fit.score * 100)}%` } })),
+          h("span", { class: "fitnum" }, r.fit.records ? `${Math.round(r.fit.score * 100)}%` : "no data")))) : null,
+      det && det.ranking.length > 1 ? h("p", { class: "note" }, "How cleanly each engine's format reads the Pokémon in this save. The best match was picked; change it with the game menu at the top.") : null,
+      h("dl", { class: "facts" },
+        h("dt", {}, "File"), h("dd", {}, st.fileName),
+        h("dt", {}, "Size"), h("dd", {}, `${(s.original.length / 1024).toFixed(0)} KB`),
+        h("dt", {}, "Active slot"), h("dd", {}, `${s.slot.index === 0 ? "A" : "B"} (save no. ${s.slot.counter})`),
+        h("dt", {}, "Security key"), h("dd", { class: "mono" }, s.profile.offsets.sb2.securityKey !== undefined ? `0x${s.securityKey.toString(16).toUpperCase().padStart(8, "0")}` : "None (Ruby/Sapphire)"),
+        h("dt", {}, "Game data"), h("dd", {}, C.data().label),
+        st.rom ? [h("dt", {}, "ROM"), h("dd", {}, `${st.rom.header.title} (${st.rom.header.code}) · ${st.rom.report.join(", ")}`)] : null),
+      C.data().notes.length ? h("ul", { class: "warnlist" }, C.data().notes.map(n => h("li", {}, n))) : null),
+  );
+}
+
+function renderSide() {
+  const s = st.save, side = $("side");
+  if (!s) { mount(side); return; }
+  const m = getSel();
+  const parts: Node[] = [];
+  if (st.view !== "trainer") parts.push(m ? editor(m) : emptySlotPanel());
+  parts.push(warningsPanel(s, m));
+  mount(side, ...parts);
+}
+
+function emptySlotPanel() {
+  const sel = st.sel;
+  return h("div", { class: "card editor" },
+    h("h3", {}, sel ? "Empty slot" : "Nothing selected"),
+    h("p", { class: "muted" }, sel ? "This slot is empty. Paste a copied Pokémon here, or drag one in." : "Select a Pokémon to edit it."),
+    sel && st.clip ? h("button", { class: "btn primary", onclick: () => { setAt(sel, Object.assign(C.cloneMon(st.clip!), { dirty: true })); touch(); } }, `Paste ${C.speciesName(st.clip.species)}`) : null);
+}
+
+function editor(m: C.Pokemon) {
+  const d = C.data();
+  const sel = st.sel!;
+  const codec = codecAt(sel);
+  const ci = C.codecInfo(codec);
+  const info = d.info[m.species];
+  const lvl = C.levelOf(m);
+  const g = C.gender(m);
+  const ratio = info?.g ?? 255;
+  const fixedGender = ratio === 0 || ratio === 254 || ratio === 255;
+  const evTotal = m.evs.reduce((a, b) => a + b, 0);
+  const opts = options();
+  const stats = lvl !== null ? C.calcStats(m, lvl) : null;
+  const isCfru = ci.abilityKind === "cfru";
+
+  const reroll = (want: Parameters<typeof C.rerollPid>[1]) => {
+    const keep = {
+      nature: C.pidNature(m), gender: fixedGender ? undefined : (g as "M" | "F"), shiny: C.isShiny(m),
+      parity: isCfru && m.abilityNum < 2 ? m.pid & 1 : undefined,
+    };
+    const pid = C.rerollPid(m, { ...keep, ...want });
+    if (pid === null) { toast("Couldn't find a matching personality value. Try again.", "bad"); return; }
+    editMon(x => { x.pid = pid; if (isCfru && x.abilityNum < 2) x.abilityNum = pid & 1; });
+  };
+
+  const nameInput = (id: string, label: string, value: string, max: number, set: (v: string) => void) =>
+    field(label, id, h("input", {
+      id, value, maxlength: max, autocomplete: "off",
+      onchange: (e: Event) => {
+        const v = (e.target as HTMLInputElement).value;
+        const bad = C.unencodable(v);
+        if (bad.length) { toast(`The game can't show ${bad.join(" ")}.`, "bad"); renderAll(); return; }
+        editMon(() => set(v));
+      },
+    }));
+
+  const abilitySlots: [number, string][] = [];
+  if (info) {
+    abilitySlots.push([0, C.abilityName(info.ab[0])]);
+    if (info.ab[1] && info.ab[1] !== info.ab[0]) abilitySlots.push([1, C.abilityName(info.ab[1])]);
+    if (ci.abilityKind !== "bit" && info.ab[2]) abilitySlots.push([2, `${C.abilityName(info.ab[2])} (hidden)`]);
+  }
+  if (!abilitySlots.some(a => a[0] === m.abilityNum)) abilitySlots.push([m.abilityNum, `${C.abilityName(C.abilityId(m))} (slot ${m.abilityNum + 1})`]);
+  const setAbility = (n: number) => {
+    if (isCfru && n < 2 && (m.pid & 1) !== n) { reroll({ parity: n }); return; } // reroll sets the slot from the new PID
+    editMon(x => { x.abilityNum = n; });
+  };
+
+  const itemControl = opts.items.length > 1
+    ? select("mItem", m.heldItem, withCurrent(opts.items, m.heldItem, C.itemName(m.heldItem)), v => editMon(x => { x.heldItem = Number(v); }))
+    : num("mItem", m.heldItem, 0, ci.maxItem, v => editMon(x => { x.heldItem = v; }));
+
+  return h("div", { class: "card editor" },
+    h("div", { class: "edhead", "data-type": info?.t?.[0] ?? "Normal" },
+      h("div", {},
+        h("div", { class: "edtitle" }, m.nickname || C.speciesName(m.species), C.isShiny(m) ? h("span", { class: "shiny" }, " ★") : null),
+        h("div", { class: "muted" }, `${speciesLabel(m.species)} · Lv ${lvl ?? "?"} · ${g === "-" ? "Genderless" : g === "M" ? "♂" : "♀"}${info?.t ? ` · ${info.t.join("/")}` : ""}`)),
+      h("div", { class: "row tight" },
+        h("button", { class: "btn small", onclick: () => { st.clip = C.cloneMon(m); toast(`Copied ${C.speciesName(m.species)}.`, ""); renderAll(); } }, "Copy"),
+        st.clip ? h("button", { class: "btn small", onclick: () => { setAt(sel, Object.assign(C.cloneMon(st.clip!), { dirty: true })); touch(); } }, "Paste") : null,
+        st.armDelete
+          ? h("button", { class: "btn small danger", onclick: () => {
+              if (sel.where === "party" && st.save!.party.length === 1) { toast("Keep at least one Pokémon in the party.", "bad"); return; }
+              setAt(sel, null); st.armDelete = false; if (sel.where === "party") st.sel = null; touch(); } }, "Confirm delete")
+          : h("button", { class: "btn small", onclick: () => { st.armDelete = true; renderAll(); } }, "Delete"))),
+
+    section("Identity",
+      h("div", { class: "fields cols2" },
+        field("Species", "mSpecies", select("mSpecies", m.species, withCurrent(opts.species, m.species, `Unknown (${m.species})`), v => {
+          const ns = Number(v);
+          editMon(x => {
+            const keepLvl = C.levelOf(x);
+            if (x.nickname === defaultName(x.species)) x.nickname = defaultName(ns).slice(0, ci.nickLen);
+            x.species = ns;
+            const ab = C.data().info[ns]?.ab;
+            if (ab && !ab[x.abilityNum]) x.abilityNum = isCfru ? x.pid & 1 : 0;
+            if (keepLvl !== null) C.setLevel(x, keepLvl);
+          });
+        })),
+        nameInput("mNick", "Nickname", m.nickname, ci.nickLen, v => { m.nickname = v; }),
+        field("Level", "mLevel", C.canSetLevel(m)
+          ? num("mLevel", lvl ?? 1, 1, 100, v => editMon(x => { C.setLevel(x, v); }))
+          : h("input", { id: "mLevel", value: lvl ?? "?", disabled: true }),
+          C.canSetLevel(m) ? `EXP ${m.exp.toLocaleString()}` : "Growth rate unknown; load the ROM to change level"),
+        field("Held item", "mItem", itemControl),
+        field("Nature", "mNature", select("mNature", C.nature(m), C.NATURES.map((n, i) => [i, n] as [number, string]),
+          v => ci.hasNatureMod ? editMon(x => { x.natureMod = (x.pid % 25) ^ Number(v); }) : reroll({ nature: Number(v) }))),
+        field("Ability", "mAbility", abilitySlots.length > 1
+          ? select("mAbility", m.abilityNum, abilitySlots, v => setAbility(Number(v)))
+          : h("input", { id: "mAbility", value: abilitySlots[0]?.[1] ?? "—", disabled: true })),
+        field("Gender", "mGender", fixedGender
+          ? h("input", { id: "mGender", value: g === "-" ? "Genderless" : g === "M" ? "Male only" : "Female only", disabled: true })
+          : select("mGender", g, [["M", "Male"], ["F", "Female"]], v => reroll({ gender: v as "M" | "F" }))),
+        field("Shiny", "mShiny", h("label", { class: "check" },
+          h("input", { id: "mShiny", type: "checkbox", checked: C.isShiny(m), onchange: (e: Event) => {
+            const want = (e.target as HTMLInputElement).checked;
+            editMon(x => { if (!C.setShiny(x, want, codec)) toast("Couldn't find a matching personality value. Try again.", "bad"); });
+          } }),
+          h("span", {}, C.isShiny(m) ? "Shiny" : "Not shiny"))),
+      ),
+      h("p", { class: "note" }, ci.hasNatureMod
+        ? "This engine stores shininess and the stat nature separately, so changing them keeps the personality value. Changing gender picks a new one."
+        : isCfru
+          ? "In CFRU the normal ability slot comes from the personality value, like nature, gender and shininess. Changing one picks a new value and keeps the others."
+          : "In Gen III, nature, gender and shininess all come from one personality value, so changing any of them picks a new one and keeps the other two."),
+    ),
+
+    section("Moves",
+      h("div", { class: "moves" }, [0, 1, 2, 3].map(i => {
+        const max = C.maxPP(m.moves[i], m.ppBonuses, i);
+        return h("div", { class: "moverow" },
+          select(`mMove${i}`, m.moves[i], withCurrent(opts.moves, m.moves[i], C.moveName(m.moves[i])).filter(([v]) => v <= ci.maxMove), v => editMon(x => {
+            x.moves[i] = Number(v); x.pp[i] = C.maxPP(x.moves[i], x.ppBonuses, i);
+          }), { "aria-label": `Move ${i + 1}` }),
+          ci.storesPP
+            ? num(`mPP${i}`, m.pp[i], 0, codec === "pex-modern" ? 127 : 99, v => editMon(x => { x.pp[i] = v; }), { "aria-label": `PP for move ${i + 1}`, class: "pp" })
+            : h("span", { class: "muted ppmax" }, "—"),
+          h("span", { class: "muted ppmax" }, max ? `/ ${max}` : ""));
+      })),
+      ci.storesPP
+        ? h("button", { class: "btn small", onclick: () => editMon(x => { x.pp = x.moves.map((mv, i) => C.maxPP(mv, x.ppBonuses, i)); }) }, "Restore all PP")
+        : h("p", { class: "note" }, "CFRU doesn't store PP for Pokémon in the PC; it's restored when you withdraw them.")),
+
+    section("Stats",
+      h("div", { class: "stats" },
+        h("div", { class: "statrow head" }, h("span", {}), h("span", {}, "IV"), h("span", {}, "EV"), h("span", {}, "Stat")),
+        STAT_LABELS.map((lab, i) => h("div", { class: "statrow" },
+          h("span", { class: "statlab" }, lab),
+          num(`mIv${i}`, m.ivs[i], 0, 31, v => editMon(x => { x.ivs[i] = v; }), { "aria-label": `${lab} IV` }),
+          num(`mEv${i}`, m.evs[i], 0, 255, v => editMon(x => { x.evs[i] = v; }), { "aria-label": `${lab} EV` }),
+          h("span", { class: "statval" }, stats ? stats[i] : m.party ? m.party.stats[i] : "?"))),
+        h("div", { class: `statrow foot ${evTotal > 510 ? "over" : ""}` }, h("span", {}, "Total"), h("span", {}), h("span", {}, `${evTotal}/510`), h("span", {}))),
+      h("div", { class: "row tight" },
+        h("button", { class: "btn small", onclick: () => editMon(x => { x.ivs = [31, 31, 31, 31, 31, 31]; }) }, "Max IVs"),
+        h("button", { class: "btn small", onclick: () => editMon(x => { x.evs = [0, 0, 0, 0, 0, 0]; }) }, "Clear EVs"))),
+
+    section("Trainer & extras",
+      h("div", { class: "fields cols2" },
+        nameInput("mOt", "OT name", m.otName, 7, v => { m.otName = v; }),
+        field("Friendship", "mFriend", num("mFriend", m.friendship, 0, 255, v => editMon(x => { x.friendship = v; })), "Max 255"),
+        field("OT Trainer ID", "mTid", num("mTid", C.tid(m), 0, 65535, v => editMon(x => { x.otId = ((C.sid(x) << 16) | v) >>> 0; }))),
+        field("OT Secret ID", "mSid", num("mSid", C.sid(m), 0, 65535, v => editMon(x => { x.otId = ((v << 16) | C.tid(x)) >>> 0; }))),
+        field("Markings", "mMark0", h("div", { class: "marks" }, MARKS.map((mk, i) =>
+          h("label", { class: `mark ${m.markings & (1 << i) ? "on" : ""}`, title: `Marking ${mk}` },
+            h("input", { id: `mMark${i}`, type: "checkbox", checked: Boolean(m.markings & (1 << i)), onchange: () => editMon(x => { x.markings ^= 1 << i; }) }), mk)))),
+        field("Egg", "mEgg", h("label", { class: "check" },
+          h("input", { id: "mEgg", type: "checkbox", checked: m.isEgg, onchange: (e: Event) => editMon(x => { x.isEgg = (e.target as HTMLInputElement).checked; }) }),
+          h("span", {}, m.isEgg ? "Is an egg" : "Hatched"))),
+      ),
+      h("dl", { class: "facts" },
+        h("dt", {}, "Personality"), h("dd", { class: "mono" }, `0x${m.pid.toString(16).toUpperCase().padStart(8, "0")}`),
+        h("dt", {}, "Met at level"), h("dd", {}, m.metLevel === 0 ? "Hatched" : String(m.metLevel)),
+        h("dt", {}, "Ball"), h("dd", {}, st.save!.profile.engine === "vanilla" ? C.itemName(m.ball) : `Ball no. ${m.ball}`),
+        h("dt", {}, "Format"), h("dd", {}, ci.label),
+        m.party ? [h("dt", {}, "HP"), h("dd", {}, `${m.party.hp} / ${m.party.stats[0]}`)] : null)),
+  );
+}
+
+function section(title: string, ...body: Node[]) {
+  return h("details", { class: "sec", open: true }, h("summary", {}, title), h("div", { class: "secbody" }, body));
+}
+
+function warningsPanel(s: C.ParsedSave, m: C.Pokemon | null) {
+  const list: { tone: string; text: string }[] = [];
+  s.warnings.forEach(w => list.push({ tone: /checksum|missing|different saves|incomplete|probably/i.test(w) ? "bad" : "warn", text: w }));
+  if (m && st.sel) C.validatePokemon(m, codecAt(st.sel)).forEach(w => list.push({ tone: "warn", text: w }));
+  const bad = [...s.party, ...s.boxes.flatMap(b => b.slots)].filter(x => x && !x.checksumOk).length;
+  if (bad) list.push({ tone: "bad", text: `${bad} Pokémon record${bad > 1 ? "s have" : " has"} a bad checksum and will appear as Bad Eggs. They are kept as they are unless you edit them.` });
+  s.profile.notes.forEach(n => list.push({ tone: "info", text: n }));
+  return h("div", { class: "card checks" },
+    h("h3", {}, "Checks"),
+    list.length
+      ? h("ul", { class: "warnlist" }, list.map(w => h("li", { class: w.tone }, w.text)))
+      : h("p", { class: "okline" }, "No problems found in this save."));
+}
+
+// ---------- Boot ----------
+
+function boot() {
+  if (IS_ANDROID_APP) {
+    const hint = $("androidHint");
+    hint.hidden = false;
+    mount(hint,
+      h("span", {}, "Nothing happens when you tap Open save? The Claude app on Android may not show file pickers. Open this page in Chrome instead:"),
+      h("code", { class: "mono urltext" }, ARTIFACT_URL),
+      h("button", { class: "btn small", onclick: async (e: Event) => {
+        const b = e.currentTarget as HTMLButtonElement;
+        try { await navigator.clipboard.writeText(ARTIFACT_URL); b.textContent = "Copied"; }
+        catch { const r = document.createRange(); r.selectNodeContents(hint.querySelector(".urltext")!); getSelection()?.removeAllRanges(); getSelection()?.addRange(r); b.textContent = "Selected — copy it"; }
+      } }, "Copy link"),
+      h("a", { class: "btn small", href: ARTIFACT_URL, target: "_blank", rel: "noopener" }, "Open in browser"));
+  }
+  document.addEventListener("dragover", e => { if (e.dataTransfer?.types.includes("Files")) e.preventDefault(); });
+  document.addEventListener("drop", e => {
+    const f = e.dataTransfer?.files?.[0];
+    if (f) { e.preventDefault(); openFile(f); }
+  });
+  window.addEventListener("beforeunload", e => { if (st.dirty && !st.isDemo) { e.preventDefault(); e.returnValue = ""; } });
+  loadBytes(demoSave(), "example-emerald.sav", true);
+}
+
+boot();
