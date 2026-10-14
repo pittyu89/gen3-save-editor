@@ -3,6 +3,7 @@
 //   expansion 1.8+ enum PokeBall (0 Strange, 1 Poké …), 6 bits — include/constants/pokeball.h
 //   expansion <1.8 the ball's item id, 5 bits
 //   CFRU          enum BallTypes (0 Master, 1 Ultra …) — include/new/catching.h
+//   compact       4 bits, read as the ball's item id (Emerald Z keeps balls first in its item list)
 import { data } from "./data";
 import type { Engine } from "./profiles";
 
@@ -39,7 +40,7 @@ const key = (s: string) => s.toLowerCase().replace(/é/g, "e").replace(/[^a-z]/g
 
 /** The item id with this ball's name, for showing its icon. */
 export function ballItem(engine: Engine, id: number): number | null {
-  if ((engine === "vanilla" || engine === "pex-legacy") && isBallName(data().items[id])) return id;
+  if ((engine === "vanilla" || engine === "pex-legacy" || engine === "compact") && isBallName(data().items[id])) return id;
   const want = key(ballName(engine, id));
   const i = data().items.findIndex(n => n && key(n) === want);
   return i > 0 ? i : null;

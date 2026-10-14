@@ -59,7 +59,7 @@ function pad5(n: number) { return String(n).padStart(5, "0"); }
 function dexNo(s: number): string {
   const d = C.data(), p = st.save?.profile;
   if (d.source === "builtin" && d.nat[s]) return `#${pad3(d.nat[s])}`;
-  if (p && (p.engine === "pex-modern" || p.engine === "pex-legacy") && s <= 1025) return `#${pad3(s)}`;
+  if (p && (p.engine === "pex-modern" || p.engine === "pex-legacy" || p.engine === "compact") && s <= 1025) return `#${pad3(s)}`;
   return `No. ${s}`;
 }
 const speciesLabel = (s: number) => `${dexNo(s)} ${C.speciesName(s)}`;
@@ -825,6 +825,11 @@ function addPokemon(sel: NonNullable<Sel>) {
     const target: NonNullable<Sel> = sel.where === "party" ? { where: "party", i: Math.min(sel.i, s.party.length) } : sel;
     const m = C.createPokemon(sp, st.addLevel, s.profile, s.trainer, target.where === "party");
     m.cipher = C.saveCipher(s);
+    // formats with fields the editor doesn't decode: start from one of the save's own records
+    if (s.profile.engine === "compact") {
+      const t = [...s.party, ...s.boxes.flatMap(b => b.slots)].find(x => x?.raw && x.codec.startsWith("compact"));
+      if (t) { m.raw = t.raw!.slice(); m.codec = t.codec; m.dirty = true; }
+    }
     setAt(target, m);
     st.sel = target; st.edTab = "info"; st.teachSlot = null; st.sheet = isPhone();
     toast(`Added ${C.speciesName(sp)} at level ${st.addLevel}.`, "good");

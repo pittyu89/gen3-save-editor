@@ -285,7 +285,7 @@ describe("save files", () => {
   });
 
   it("exposes every profile", () => {
-    expect(PROFILES.map(p => p.id)).toEqual(["ruby-us", "sapphire-us", "emerald-us", "firered-us", "leafgreen-us", "pex-modern", "pex-legacy", "cfru"]);
+    expect(PROFILES.map(p => p.id)).toEqual(["ruby-us", "sapphire-us", "emerald-us", "firered-us", "leafgreen-us", "pex-modern", "pex-legacy", "cfru", "compact"]);
     for (const p of PROFILES) expect(p.sectionSizes.length).toBe(14);
     expect(u16(new Uint8Array([1, 2]), 0)).toBe(0x0201);
   });
@@ -548,5 +548,29 @@ describe("hacks without Pokémon encryption", () => {
     expect(r2.boxes[0].slots[0]!.nickname).toBe("CHAR");
     expect(r2.boxes[0].slots[0]!.cipher).toBe("plain");
     expect(r2.party[0].cipher).toBe("vanilla");
+  });
+});
+
+describe("compact unencrypted records (Emerald Z style)", () => {
+  it("round-trips party and PC Pokémon", () => {
+    const P = getProfile("compact");
+    const bytes = buildSave({ profile: P, money: 4321, party: [makeMon(25, 30, { moves: [85, 98, 0, 0], pp: [15, 30, 0, 0], heldItem: 7 })],
+      boxMons: [{ box: 0, slot: 0, mon: makeMon(150, 70) }, { box: 17, slot: 29, mon: makeMon(4, 12) }] });
+    const s = parse(bytes, P);
+    expect(s.chunk).toBe(0xff4);
+    expect(s.trainer.money).toBe(4321);
+    expect(s.party[0].species).toBe(25);
+    expect(levelOf(s.party[0])).toBe(30);
+    expect(s.party[0].moves).toEqual([85, 98, 0, 0]);
+    expect(s.party[0].pp).toEqual([15, 30, 0, 0]);
+    expect(s.party[0].heldItem).toBe(7);
+    expect(s.boxes[0].slots[0]?.species).toBe(150);
+    expect(s.boxes[17].slots[29]?.species).toBe(4);
+    expect(s.boxes[17].name).toBe("BOX18");
+    expect(write(s)).toEqual(bytes);
+    s.boxes[0].slots[0]!.nickname = "MEWTWOOO"; s.boxes[0].slots[0]!.dirty = true;
+    const r = parse(write(s), P);
+    expect(r.boxes[0].slots[0]!.nickname).toBe("MEWTWOOO");
+    expect(verify(write(s), s.slot.index, P)).toEqual([]);
   });
 });

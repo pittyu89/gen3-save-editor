@@ -21,7 +21,7 @@ const ORDER: number[][] = [
   [1,2,3,0],[1,3,2,0],[2,1,3,0],[3,1,2,0],[2,3,1,0],[3,2,1,0],
 ];
 
-export type CodecId = "vanilla" | "pex-modern" | "pex-legacy" | "cfru-party" | "cfru-box";
+export type CodecId = "vanilla" | "pex-modern" | "pex-legacy" | "cfru-party" | "cfru-box" | "compact-box" | "compact-party";
 
 export interface Pokemon {
   codec: CodecId;            // codec that produced this record
@@ -87,7 +87,7 @@ function setBits(b: Uint8Array, [o, bit, w]: Bits, value: number) {
 // Offsets in the secure area are canonical: Growth 0-11, Attacks 12-23, EVs 24-35, Misc 36-47.
 
 interface FullSpec {
-  id: Exclude<CodecId, "cfru-box">;
+  id: Exclude<CodecId, "cfru-box" | "compact-box" | "compact-party">;
   label: string;
   nickLen: number;
   species: Bits; item: Bits; exp: Bits;
@@ -150,17 +150,36 @@ export interface CodecInfo {
   size: number;
   /** Largest ball id the record can hold. */
   maxBall: number;
+  /** Party records: where the party-only fields start, and the record size. */
+  partyAt: number;
+  partySize: number;
 }
 
+// ---- Compact, unencrypted records (some decomp hacks, e.g. Emerald Z) ----
+// Read from real saves; fields not listed are kept as they are.
+//   0x00 pid u32 · 0x04 OT id u32 · 0x08 nickname[12]
+//   0x14 u32 species:11 exp:21 · 0x18 u32 move1:10 move2:10 language:4 friendship:8
+//   0x1C u32 move3:10 move4:10 abilityNum:2 (+10 unknown bits) · 0x20 EVs[6] · 0x26 contest[6]
+//   0x2C u16 heldItem:10 (+6) · 0x2E u16 metLevel:7 metGame:4 ball:4 otGender:1 · 0x30 met location
+//   0x31 OT name[7] · 0x38 u32 IVs 6×5 bits (+2 unknown) · 0x3C u32 (unknown)
+//   Verified: computed stats match the stored party stats for every Pokémon in the sample save.
+//   PC record 64 bytes; party adds PP[4] at 0x40, then status/level/HP/stats at 0x44 (88 bytes).
+export const COMPACT_BOX_SIZE = 64, COMPACT_PARTY_SIZE = 88;
+
 export function codecInfo(id: CodecId): CodecInfo {
+  if (id === "compact-box" || id === "compact-party") return {
+    id, label: "Compact, unencrypted (decomp hack)", nickLen: 12, maxSpecies: 2047, maxItem: 1023, maxMove: 1023,
+    encrypted: false, storesPP: id === "compact-party", hasShinyMod: false, hasNatureMod: false, abilityKind: "num",
+    size: COMPACT_BOX_SIZE, maxBall: 15, partyAt: 0x44, partySize: COMPACT_PARTY_SIZE,
+  };
   if (id === "cfru-box") return {
     id, label: "CFRU PC (compressed)", nickLen: 10, maxSpecies: 0xffff, maxItem: 0xffff, maxMove: 1023,
-    encrypted: false, storesPP: false, hasShinyMod: false, hasNatureMod: false, abilityKind: "cfru", size: CFRU_BOX_SIZE, maxBall: 255,
+    encrypted: false, storesPP: false, hasShinyMod: false, hasNatureMod: false, abilityKind: "cfru", size: CFRU_BOX_SIZE, maxBall: 255, partyAt: 0x50, partySize: PARTY_SIZE,
   };
   const s = SPECS[id];
   return {
     id, label: s.label, nickLen: s.nickLen, maxSpecies: s.maxSpecies, maxItem: s.maxItem, maxMove: s.maxMove,
-    encrypted: true, storesPP: true, hasShinyMod: !!s.shinyMod, hasNatureMod: !!s.natureMod, abilityKind: s.ability.kind, size: BOX_SIZE, maxBall: (1 << s.ball[2]) - 1,
+    encrypted: true, storesPP: true, hasShinyMod: !!s.shinyMod, hasNatureMod: !!s.natureMod, abilityKind: s.ability.kind, size: BOX_SIZE, maxBall: (1 << s.ball[2]) - 1, partyAt: 0x50, partySize: PARTY_SIZE,
   };
 }
 
@@ -171,13 +190,16 @@ export function isEmptyRecord(b: Uint8Array, o: number): boolean {
 }
 
 export function decodePokemon(b: Uint8Array, o: number, isParty: boolean, codec: CodecId = "vanilla"): Pokemon | null {
-  const m = codec === "cfru-box" ? decodeCompressed(b, o) : decodeFull(b, o, SPECS[codec]);
+  const m = codec === "cfru-box" ? decodeCompressed(b, o)
+    : codec === "compact-box" || codec === "compact-party" ? decodeCompact(b, o, codec)
+    : decodeFull(b, o, SPECS[codec]);
   if (m && isParty) {
+    const ci = codecInfo(codec), P = ci.partyAt;
     m.party = {
-      status: u32(b, o + 0x50), level: u8(b, o + 0x54), mail: u8(b, o + 0x55), hp: u16(b, o + 0x56),
-      stats: [0, 1, 2, 3, 4, 5].map(i => u16(b, o + 0x58 + i * 2)),
+      status: u32(b, o + P), level: u8(b, o + P + 4), mail: u8(b, o + P + 5), hp: u16(b, o + P + 6),
+      stats: [0, 1, 2, 3, 4, 5].map(i => u16(b, o + P + 8 + i * 2)),
     };
-    m.raw = b.slice(o, o + PARTY_SIZE);
+    m.raw = b.slice(o, o + ci.partySize);
   }
   return m;
 }
@@ -283,15 +305,17 @@ function decodeCompressed(b: Uint8Array, o: number): Pokemon | null {
 
 /** Writes `mon` into `b` at `o` using `codec`, re-encrypting and recomputing the checksum. */
 export function encodePokemon(mon: Pokemon, b: Uint8Array, o: number, isParty: boolean, codec: CodecId = "vanilla"): void {
-  const size = isParty ? PARTY_SIZE : codecInfo(codec).size;
+  const ci = codecInfo(codec);
+  const size = isParty ? ci.partySize : ci.size;
   if (!mon.dirty && mon.raw && mon.codec === codec && mon.raw.length >= size) { b.set(mon.raw.subarray(0, size), o); return; }
   if (codec === "cfru-box") encodeCompressed(mon, b, o);
+  else if (codec === "compact-box" || codec === "compact-party") encodeCompact(mon, b, o, codec);
   else encodeFull(mon, b, o, SPECS[codec]);
   if (isParty) {
     if (!mon.party) toParty(mon);
-    const p = mon.party!;
-    w32(b, o + 0x50, p.status); w8(b, o + 0x54, p.level); w8(b, o + 0x55, p.mail); w16(b, o + 0x56, p.hp);
-    p.stats.forEach((s, i) => w16(b, o + 0x58 + i * 2, s));
+    const p = mon.party!, P = ci.partyAt;
+    w32(b, o + P, p.status); w8(b, o + P + 4, p.level); w8(b, o + P + 5, p.mail); w16(b, o + P + 6, p.hp);
+    p.stats.forEach((s, i) => w16(b, o + P + 8 + i * 2, s));
   }
   mon.checksumOk = true;
 }
@@ -385,6 +409,61 @@ function encodeCompressed(mon: Pokemon, b: Uint8Array, o: number) {
   b.set(r, o);
   mon.codec = "cfru-box";
   mon.raw = r;
+  mon.secure = undefined;
+}
+
+function decodeCompact(b: Uint8Array, o: number, codec: CodecId): Pokemon | null {
+  const w14 = u32(b, o + 0x14), w18 = u32(b, o + 0x18), w1c = u32(b, o + 0x1c);
+  const species = w14 & 0x7ff;
+  if (species === 0) return null;
+  const pid = u32(b, o), origin = u16(b, o + 0x2e), ivw = u32(b, o + 0x38);
+  const party = codec === "compact-party";
+  const m: Pokemon = {
+    codec, pid, otId: u32(b, o + 4),
+    nickname: decodeText(b, o + 8, 12), language: (w18 >>> 20) & 0xf, flags: 0,
+    otName: decodeText(b, o + 0x31, 7), markings: 0,
+    species, heldItem: u16(b, o + 0x2c) & 0x3ff, exp: w14 >>> 11, ppBonuses: 0, friendship: w18 >>> 24,
+    ball: (origin >>> 11) & 0xf,
+    moves: [w18 & 0x3ff, (w18 >>> 10) & 0x3ff, w1c & 0x3ff, (w1c >>> 10) & 0x3ff], pp: [0, 0, 0, 0],
+    evs: [0, 1, 2, 3, 4, 5].map(i => b[o + 0x20 + i]), contest: [0, 1, 2, 3, 4, 5].map(i => b[o + 0x26 + i]),
+    pokerus: 0, metLocation: b[o + 0x30],
+    metLevel: origin & 0x7f, metGame: (origin >>> 7) & 0xf, otGender: (origin >>> 15) & 1,
+    ivs: [0, 1, 2, 3, 4, 5].map(i => (ivw >>> (i * 5)) & 31), isEgg: false, // egg flag not identified yet
+    abilityNum: (w1c >>> 20) & 3, shinyMod: 0, natureMod: 0, checksumOk: true,
+    raw: b.slice(o, o + (party ? COMPACT_PARTY_SIZE : COMPACT_BOX_SIZE)),
+  };
+  m.pp = party ? [0, 1, 2, 3].map(i => b[o + 0x40 + i]) : m.moves.map((mv, i) => maxPP(mv, 0, i));
+  return m;
+}
+
+function encodeCompact(mon: Pokemon, b: Uint8Array, o: number, codec: CodecId) {
+  // start from this record's own bytes (or a template from the same save) so unknown bits survive
+  const base = mon.raw && (mon.codec === "compact-box" || mon.codec === "compact-party") ? mon.raw : null;
+  const r = new Uint8Array(0x44);
+  if (base) r.set(base.subarray(0, Math.min(0x44, base.length)));
+  w32(r, 0, mon.pid); w32(r, 4, mon.otId);
+  writeName(mon, [...mon.nickname].slice(0, 12).join(""), 8, 12, r);
+  w32(r, 0x14, ((mon.species & 0x7ff) | ((mon.exp & 0x1fffff) << 11)) >>> 0);
+  const mv = mon.moves.map(x => x & 0x3ff);
+  w32(r, 0x18, (mv[0] | (mv[1] << 10) | ((mon.language & 0xf) << 20) | ((mon.friendship & 0xff) << 24)) >>> 0);
+  const keep1c = u32(r, 0x1c) & 0xffc00000;
+  w32(r, 0x1c, (keep1c | mv[2] | (mv[3] << 10) | ((mon.abilityNum & 3) << 20)) >>> 0);
+  mon.evs.forEach((v, i) => { r[0x20 + i] = v; });
+  mon.contest.forEach((v, i) => { r[0x26 + i] = v; });
+  w16(r, 0x2c, (u16(r, 0x2c) & 0xfc00) | (mon.heldItem & 0x3ff));
+  w16(r, 0x2e, (mon.metLevel & 0x7f) | ((mon.metGame & 0xf) << 7) | ((mon.ball & 0xf) << 11) | ((mon.otGender & 1) << 15));
+  r[0x30] = mon.metLocation & 0xff;
+  writeName(mon, mon.otName, 0x31, 7, r);
+  let ivw = u32(r, 0x38) & 0xc0000000; // top two bits: meaning unknown, kept
+  mon.ivs.forEach((v, i) => { ivw |= (v & 31) << (i * 5); });
+  w32(r, 0x38, ivw >>> 0);
+  if (codec === "compact-party") { mon.pp.forEach((v, i) => { r[0x40 + i] = v; }); b.set(r, o); }
+  else b.set(r.subarray(0, COMPACT_BOX_SIZE), o);
+  const size = codec === "compact-party" ? COMPACT_PARTY_SIZE : COMPACT_BOX_SIZE;
+  const raw = new Uint8Array(size); raw.set(b.subarray(o, o + Math.min(size, 0x44)));
+  if (base && base.length > 0x44 && size > 0x44) raw.set(base.subarray(0x44, size), 0x44);
+  mon.codec = codec;
+  mon.raw = raw;
   mon.secure = undefined;
 }
 

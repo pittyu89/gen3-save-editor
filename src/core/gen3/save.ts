@@ -3,7 +3,7 @@
 import { u16, u32, w16, w32, sectorChecksum } from "../binary";
 import { decodeText, encodeText, decodeStrict } from "../text";
 import { GameProfile, PROFILES, Family, Block, Loc, getProfile, profilesForFamily } from "../profiles";
-import { Pokemon, decodePokemon, encodePokemon, clearRecord, codecInfo, plausibility, PARTY_SIZE } from "./pokemon";
+import { Pokemon, decodePokemon, encodePokemon, clearRecord, codecInfo, plausibility } from "./pokemon";
 import { GameData, data, setData, VANILLA, nationalFallback, cfruFallback } from "../data";
 
 export const SECTOR_SIZE = 0x1000;
@@ -270,7 +270,7 @@ export function parse(input: Uint8Array, profile: GameProfile, slotIndex?: 0 | 1
   const warnings = [...messages, ...slot.problems];
 
   // CFRU's compressed boxes fix its layout; other profiles follow what the save itself uses.
-  const c = profile.engine === "cfru" ? profile.chunk : Math.max(profile.chunk, detectChunk(bytes, slot));
+  const c = profile.engine === "cfru" || profile.chunk > SECTOR_DATA ? profile.chunk : Math.max(profile.chunk, detectChunk(bytes, slot));
   const blocks: Record<Block, Uint8Array> = {
     sb2: gather(bytes, slot, 0, 0, c), sb1: gather(bytes, slot, 1, 4, c), storage: gather(bytes, slot, 5, 13, c),
     ext: gatherExt(bytes, profile),
@@ -296,7 +296,7 @@ export function parse(input: Uint8Array, profile: GameProfile, slotIndex?: 0 | 1
   const count = Math.min(6, sb1[o1.partyCount]);
   if (sb1[o1.partyCount] > 6) warnings.push(`Party count is ${sb1[o1.partyCount]}; only 6 are read.`);
   for (let i = 0; i < count; i++) {
-    const m = decodePokemon(sb1, o1.party + i * PARTY_SIZE, true, profile.partyCodec);
+    const m = decodePokemon(sb1, o1.party + i * codecInfo(profile.partyCodec).partySize, true, profile.partyCodec);
     if (m) { party.push(m); fitScores.push(plausibility(m, profile.partyCodec)); }
     else fitScores.push(0);
   }
@@ -347,9 +347,9 @@ export function write(save: ParsedSave): Uint8Array {
 
   sb1[o1.partyCount] = save.party.length;
   for (let i = 0; i < 6; i++) {
-    const off = o1.party + i * PARTY_SIZE;
+    const psz = codecInfo(p.partyCodec).partySize, off = o1.party + i * psz;
     if (i < save.party.length) encodePokemon(save.party[i], sb1, off, true, p.partyCodec);
-    else if (decodePokemon(sb1, off, true, p.partyCodec)) clearRecord(sb1, off, PARTY_SIZE); // leave already-empty slots byte-identical
+    else if (decodePokemon(sb1, off, true, p.partyCodec)) clearRecord(sb1, off, psz); // leave already-empty slots byte-identical
   }
   const recSize = codecInfo(p.boxCodec).size;
   save.boxes.forEach((box, b) => {

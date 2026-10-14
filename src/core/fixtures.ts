@@ -2,7 +2,7 @@
 import { w16, w32, sectorChecksum } from "./binary";
 import { encodeText } from "./text";
 import { GameProfile, Block } from "./profiles";
-import { Pokemon, encodePokemon, calcStats, levelOf, codecInfo, PARTY_SIZE } from "./gen3/pokemon";
+import { Pokemon, encodePokemon, calcStats, levelOf, codecInfo } from "./gen3/pokemon";
 import { expForLevel, data } from "./data";
 import { SECTOR_SIZE, SIGNATURE } from "./gen3/save";
 
@@ -54,7 +54,7 @@ export function buildSave(o: FixtureOpts): Uint8Array {
     const lvl = levelOf(m) ?? 5;
     const stats = calcStats(m, lvl) ?? [20, 10, 10, 10, 10, 10];
     m.party = m.party ?? { status: 0, level: lvl, mail: 0xff, hp: stats[0], stats };
-    encodePokemon(m, sb1, p.offsets.sb1.party + i * PARTY_SIZE, true, p.partyCodec);
+    encodePokemon(m, sb1, p.offsets.sb1.party + i * codecInfo(p.partyCodec).partySize, true, p.partyCodec);
   });
   for (const b of o.boxMons ?? []) {
     const l = p.boxSlot(b.box, b.slot);

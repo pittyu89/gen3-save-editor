@@ -6,7 +6,7 @@
 import type { CodecId } from "./gen3/pokemon";
 
 export type Family = "RS" | "E" | "FRLG";
-export type Engine = "vanilla" | "pex-modern" | "pex-legacy" | "cfru";
+export type Engine = "vanilla" | "pex-modern" | "pex-legacy" | "cfru" | "compact";
 export type Block = "sb2" | "sb1" | "storage" | "ext";
 export interface Loc { block: Block; offset: number }
 
@@ -120,6 +120,22 @@ const CFRU: Omit<GameProfile, "id" | "name" | "short" | "gameCode"> = {
   notes: ["CFRU drops contest stats, ribbons and current PP for Pokémon stored in the PC; the game does the same."],
 };
 
+// Decomp hacks with compact, unencrypted Pokémon (64-byte PC records, 88-byte party records), 18 boxes
+// and full 0xFF4-byte sectors. Reverse-engineered from Pokémon Emerald Z 1.2.0 saves.
+const COMPACT_BOXES = 18, COMPACT_REC = 64, COMPACT_NAMES = 4 + COMPACT_BOXES * 30 * COMPACT_REC;
+const COMPACT: Omit<GameProfile, "id" | "name" | "short" | "gameCode"> = {
+  ...E, engine: "compact", chunk: 0xff4,
+  sectionSizes: Array(14).fill(0xff4),
+  partyCodec: "compact-party", boxCodec: "compact-box", fallbackData: "national",
+  offsets: { sb2: { ...E.offsets.sb2, battlePoints: undefined }, sb1: { partyCount: 0x234, party: 0x238, money: 0x448, coins: 0x44c } },
+  boxCount: COMPACT_BOXES, boxSlots: 30,
+  currentBox: { block: "storage", offset: 0 },
+  boxSlot: (b, s) => ({ block: "storage", offset: 4 + (b * 30 + s) * COMPACT_REC }),
+  boxName: b => ({ block: "storage", offset: COMPACT_NAMES + b * 9 }),
+  wallpaper: b => ({ block: "storage", offset: COMPACT_NAMES + COMPACT_BOXES * 9 + b }),
+  notes: ["This hack stores Pokémon in its own compact format. Fields the editor doesn't know are kept unchanged."],
+};
+
 export const PROFILES: GameProfile[] = [
   { id: "ruby-us", name: "Pokémon Ruby (US)", short: "Ruby", gameCode: "AXVE", ...RS },
   { id: "sapphire-us", name: "Pokémon Sapphire (US)", short: "Sapphire", gameCode: "AXPE", ...RS },
@@ -129,6 +145,7 @@ export const PROFILES: GameProfile[] = [
   { id: "pex-modern", name: "Emerald hack · pokeemerald-expansion 1.8+", short: "Expansion 1.8+", gameCode: "BPEE", ...PEX, engine: "pex-modern", partyCodec: "pex-modern", boxCodec: "pex-modern" },
   { id: "pex-legacy", name: "Emerald hack · pokeemerald-expansion 1.0–1.7", short: "Expansion 1.0–1.7", gameCode: "BPEE", ...PEX, engine: "pex-legacy", partyCodec: "pex-legacy", boxCodec: "pex-legacy" },
   { id: "cfru", name: "FireRed hack · CFRU", short: "CFRU", gameCode: "BPRE", ...CFRU },
+  { id: "compact", name: "Emerald hack · compact Pokémon data (e.g. Emerald Z)", short: "Compact", gameCode: "BPEE", ...COMPACT },
 ];
 
 export function getProfile(id: string): GameProfile {
