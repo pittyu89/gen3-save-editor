@@ -63,3 +63,21 @@ export function decodeStrict(b: Uint8Array, offset: number, maxLen: number): str
   }
   return null;
 }
+
+/** Decodes a multi-line game message (line breaks 0xFE/0xFA/0xFB become spaces). Null if it isn't text. */
+export function decodeMessage(b: Uint8Array, offset: number, maxLen = 400): string | null {
+  let s = "";
+  for (let i = 0; i < maxLen; i++) {
+    const p = offset + i;
+    if (p >= b.length) return null;
+    const c = b[p];
+    if (c === EOS) return s.replace(/\s+/g, " ").trim();
+    if (c === 0xfe || c === 0xfa || c === 0xfb) { s += " "; continue; }
+    if (c === 0xfc) { i += 1; continue; }        // text colour and similar control codes: skip their argument
+    if (c === 0xfd) { i += 1; continue; }        // placeholder (player name etc.)
+    const ch = DECODE.get(c);
+    if (ch === undefined) return null;
+    s += ch;
+  }
+  return null;
+}

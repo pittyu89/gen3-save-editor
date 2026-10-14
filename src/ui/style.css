@@ -523,3 +523,33 @@ body.picking { overflow: hidden; }
 /* White text on every type colour; a soft shadow keeps it readable on the light ones */
 .typebadge, .mvname[data-type]:not([data-type="none"]), .pickbtn.typed[data-type]:not([data-type="none"]),
 .segbtn[data-type]:not([data-type="none"]), .pickrow[data-type]:not([data-type="none"]) { color: #fff; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.55); }
+
+/* Move details */
+.catpill { display: inline-block; font-size: 0.64rem; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; padding: 2px 7px;
+  border-radius: 999px; color: #fff; text-shadow: none; flex: none; }
+.cat-physical { background: #c4492b; } .cat-special { background: #3f5fb5; } .cat-status { background: #6f7680; }
+.mvstats { display: inline-flex; align-items: center; gap: 8px; font-size: 0.8rem; flex-wrap: wrap; }
+.mvname .mvstats, .pickrow .mvstats { font-size: 0.75rem; font-weight: 700; }
+.mvname .catpill, .pickrow .catpill { box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.35); }
+.moveitem { display: flex; flex-direction: column; gap: 4px; }
+.movedetail { display: flex; flex-direction: column; gap: 3px; padding: 0 4px 6px; }
+.mvdesc { margin: 0; font-size: 0.82rem; line-height: 1.4; color: var(--muted); }
+.lrname { font: inherit; font-weight: 700; display: flex; align-items: center; justify-content: space-between; gap: 8px; text-align: left; cursor: pointer; min-width: 0; width: 100%; min-height: 40px; }
+.mvlabel { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lrdesc { grid-column: 2 / -1; display: flex; flex-direction: column; gap: 3px; padding: 2px 4px 6px; }
+
+/* Picker rows with details */
+.pkbody { display: flex; flex-direction: column; min-width: 0; flex: 1; gap: 1px; }
+.pksub { font-size: 0.76rem; font-weight: 400; opacity: 0.85; line-height: 1.3; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.pkright { flex: none; margin-left: auto; }
+.bst { display: flex; flex-direction: column; align-items: flex-end; font-weight: 700; font-variant-numeric: tabular-nums; }
+.bst small { font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.pickrow.chosen { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pickpreview { border-top: 1px solid var(--line); padding-top: 10px; max-height: 55%; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; flex: none; }
+.pickpreview[hidden] { display: none; }
+.pickconfirm { position: sticky; bottom: 0; background: var(--surface); padding-top: 6px; gap: 8px; }
+.pickconfirm .btn.primary { flex: 1; min-height: 44px; }
+.spreview { display: flex; flex-direction: column; gap: 8px; }
+.sphead { display: flex; align-items: center; gap: 10px; }
+.sphead .types { margin-top: 4px; display: inline-flex; gap: 4px; }
+.pickrow { flex: none; padding-top: 6px; padding-bottom: 6px; }

@@ -538,17 +538,52 @@ const ballIcon = (m: C.Pokemon, cls = "itemicon") => {
 /** Type of a move, when the ROM's move table gave it. */
 const moveType = (mv: number) => (mv ? C.data().moveTypes?.[mv] : undefined) || undefined;
 
+// ---------- Move details ----------
+const moveCat = (mv: number) => (mv ? C.data().moveCat?.[mv] : undefined);
+const moveDesc = (mv: number) => (mv ? C.data().moveDesc?.[mv] || "" : "");
+const CAT_SHORT = { Physical: "Phys", Special: "Spec", Status: "Status" } as const;
+function catPill(mv: number, short = false) {
+  const c = moveCat(mv);
+  return c ? h("span", { class: `catpill cat-${c.toLowerCase()}`, title: c }, short ? CAT_SHORT[c] : c) : null;
+}
+/** "Physical · 80 power · 100% accuracy", with dashes for variable power and moves that never miss. */
+function moveStats(mv: number, short = false) {
+  const d = C.data();
+  if (!mv || !d.movePower) return null;
+  const pw = d.movePower[mv] ?? 0, acc = d.moveAcc?.[mv] ?? 0, cat = moveCat(mv);
+  const power = cat === "Status" ? null : pw <= 1 ? "—" : String(pw);
+  return h("span", { class: "mvstats" }, catPill(mv, short),
+    power !== null ? h("span", {}, short ? power : `${power} power`) : null,
+    short ? null : h("span", {}, acc ? `${acc}% accuracy` : "Never misses"));
+}
+
 // ---------- Pickers ----------
 const speciesPickOptions = (): PickOption[] =>
-  options().species.map(([v]) => ({ value: v, label: C.speciesName(v), meta: dexNo(v), icon: () => spriteURL(v, false) }));
+  options().species.map(([v]) => {
+    const info = C.data().info[v];
+    const abil = info ? [...new Set(info.ab.filter(Boolean))].map(a => C.abilityName(a)).join(", ") : "";
+    return {
+      value: v, label: C.speciesName(v), meta: dexNo(v), icon: () => spriteURL(v, false),
+      sub: info ? `${info.t.join(" / ")}${abil ? ` · ${abil}` : ""}` : undefined,
+      right: info ? () => h("span", { class: "bst" }, h("small", {}, "Total"), String(info.bs.reduce((a, b) => a + b, 0))) : undefined,
+    };
+  });
 const itemPickOptions = (max: number): PickOption[] =>
   options().items.filter(([v]) => v <= max).map(([v, label]) => ({ value: v, label, icon: () => itemIconURL(v) }));
 const ballPickOptions = (max: number): PickOption[] =>
   C.ballChoices(st.save!.profile.engine).filter(([v]) => v <= max).map(([v, label]) => ({ value: v, label, icon: () => { const it = C.ballItem(st.save!.profile.engine, v); return it === null ? null : itemIconURL(it); } }));
 const movePickOptions = (max: number): PickOption[] =>
-  options().moves.filter(([v]) => v <= max).map(([v, label]) => ({ value: v, label: v ? label : "— (no move)", type: moveType(v) }));
-function pickSpecies(title: string, current: number, onPick: (v: number) => void) {
-  openPicker({ title, options: speciesPickOptions(), current, onPick, iconSize: "lg" });
+  options().moves.filter(([v]) => v <= max).map(([v, label]) => ({
+    value: v, label: v ? label : "— (no move)", type: moveType(v), sub: moveDesc(v) || undefined, right: v ? () => moveStats(v, true) : undefined,
+  }));
+function speciesPreview(v: number) {
+  return h("div", { class: "spreview" },
+    h("div", { class: "sphead" }, (() => { const u = spriteURL(v, false); return u ? h("img", { src: u, alt: "", class: "art md sprite" }) : null; })(),
+      h("div", {}, h("strong", {}, C.speciesName(v)), h("div", { class: "muted small" }, dexNo(v)), typeBadges(v))),
+    baseStats(v));
+}
+function pickSpecies(title: string, current: number, onPick: (v: number) => void, confirm: (v: number) => string) {
+  openPicker({ title, options: speciesPickOptions(), current, onPick, iconSize: "lg", preview: speciesPreview, confirmLabel: confirm });
 }
 
 const svg = (body: string, cls: string, label?: string) => {
@@ -793,7 +828,7 @@ function addPokemon(sel: NonNullable<Sel>) {
     st.sel = target; st.edTab = "info"; st.teachSlot = null; st.sheet = isPhone();
     toast(`Added ${C.speciesName(sp)} at level ${st.addLevel}.`, "good");
     touch();
-  });
+  }, v => `Add ${C.speciesName(v)} · Lv ${st.addLevel}`);
 }
 
 function emptySlotPanel() {
@@ -898,7 +933,7 @@ function editor(m: C.Pokemon) {
             if (ab && !ab[x.abilityNum]) x.abilityNum = isCfru ? x.pid & 1 : 0;
             if (keepLvl !== null) C.setLevel(x, keepLvl);
           });
-        }) })),
+        }, v => `Change to ${C.speciesName(v)}`) })),
         nameInput("mNick", "Nickname", m.nickname, ci.nickLen, v => { m.nickname = v; }),
         field("Level", "mLevel", C.canSetLevel(m)
           ? num("mLevel", lvl ?? 1, 1, 100, v => editMon(x => { C.setLevel(x, v); }))
@@ -933,7 +968,7 @@ function editor(m: C.Pokemon) {
     st.edTab !== "moves" ? null : section("Moves",
       h("div", { class: "moves" }, [0, 1, 2, 3].map(i => {
         const max = C.maxPP(m.moves[i], m.ppBonuses, i);
-        return h("div", { class: "moverow" },
+        return h("div", { class: "moveitem" }, h("div", { class: "moverow" },
           pickButton(`mMove${i}`, m.moves[i] ? C.moveName(m.moves[i]) : "—", { type: moveType(m.moves[i]) ?? "none", ariaLabel: `Move ${i + 1}: ${m.moves[i] ? C.moveName(m.moves[i]) : "none"}`,
             onclick: () => openPicker({ title: `Move ${i + 1}`, options: movePickOptions(ci.maxMove), current: m.moves[i], onPick: v => editMon(x => {
               x.moves[i] = v; x.pp[i] = C.maxPP(v, x.ppBonuses, i);
@@ -941,7 +976,10 @@ function editor(m: C.Pokemon) {
           ci.storesPP
             ? num(`mPP${i}`, m.pp[i], 0, codec === "pex-modern" ? 127 : 99, v => editMon(x => { x.pp[i] = v; }), { "aria-label": `PP for move ${i + 1}`, class: "pp" })
             : h("span", { class: "muted ppmax" }, "—"),
-          h("span", { class: "muted ppmax" }, max ? `/ ${max}` : ""));
+          h("span", { class: "muted ppmax" }, max ? `/ ${max}` : "")),
+          m.moves[i] && (C.data().movePower || moveDesc(m.moves[i]))
+            ? h("div", { class: "movedetail" }, moveStats(m.moves[i]), moveDesc(m.moves[i]) ? h("p", { class: "mvdesc" }, moveDesc(m.moves[i])) : null)
+            : null);
       })),
       ci.storesPP
         ? h("button", { class: "btn small", onclick: () => editMon(x => { x.pp = x.moves.map((mv, i) => C.maxPP(mv, x.ppBonuses, i)); }) }, "Restore all PP")
@@ -1016,6 +1054,7 @@ function baseStats(species: number) {
       h("dt", {}, "Gender"), h("dd", {}, genderRatio(info.g))));
 }
 
+const openDescs = new Set<string>(); // learnable moves whose description is expanded
 /** Moves this species learns, with a button to teach each one. */
 function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
   const d = C.data(), L = d.learn;
@@ -1032,9 +1071,15 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
         st.teachSlot = null;
         toast(`${m.nickname || C.speciesName(m.species)} learned ${C.moveName(mv)}.`, "good");
       } }, "Teach");
-  const row = (tag: string, mv: number, later = false) =>
-    h("li", { class: `learnrow ${later ? "later" : ""}` }, h("span", { class: "lrtag mono" }, tag),
-      h("span", { class: "lrname mvname", "data-type": moveType(mv) ?? "none" }, C.moveName(mv)), teachBtn(mv));
+  const row = (tag: string, mv: number, later = false) => {
+    const key = `${tag}-${mv}`, open = openDescs.has(key), desc = moveDesc(mv);
+    return h("li", { class: `learnrow ${later ? "later" : ""}` }, h("span", { class: "lrtag mono" }, tag),
+      h("button", { class: "lrname mvname", type: "button", "data-type": moveType(mv) ?? "none", "aria-expanded": open ? "true" : "false",
+        title: desc || undefined, onclick: () => { open ? openDescs.delete(key) : openDescs.add(key); renderAll(); } },
+        h("span", { class: "mvlabel" }, C.moveName(mv)), moveStats(mv, true)),
+      teachBtn(mv),
+      open ? h("div", { class: "lrdesc" }, moveStats(mv), desc ? h("p", { class: "mvdesc" }, desc) : null) : null);
+  };
   const group = (title: string, items: Node[], open: boolean, empty: string) =>
     h("details", { class: "learngroup", open },
       h("summary", {}, `${title} · ${items.length}`),

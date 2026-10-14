@@ -3,7 +3,7 @@
 // every Gen III engine keeps (Bulbasaur, Pound, Master Ball, Stench...), and struct field offsets are
 // learned by matching values that never changed across engines. The ROM is only read, never modified.
 import { u32 } from "./binary";
-import { encodeBytes, decodeStrict } from "./text";
+import { encodeBytes, decodeStrict, decodeMessage } from "./text";
 import { GameData, SpeciesInfo, titleCase, TYPE_NAMES } from "./data";
 import { findLearnsets } from "./learnsets";
 
@@ -164,6 +164,63 @@ function findBattleMoves(rom: Uint8Array): { at: number; count: number } | null 
   return best;
 }
 
+
+// ---- Move details: category, power, accuracy, description ----
+
+export type MoveCategory = "Physical" | "Special" | "Status";
+const SPECIAL_TYPES = new Set(["Fire", "Water", "Grass", "Electric", "Psychic", "Ice", "Dragon", "Dark"]);
+
+/** Battle stats from a vanilla-layout 12-byte table. Hacks with the physical/special split keep it at +10. */
+function battleDetails(rom: Uint8Array, at: number, count: number, types: string[] | null) {
+  const power: number[] = [], acc: number[] = [];
+  for (let i = 0; i < count; i++) { power.push(rom[at + i * 12 + 1] ?? 0); acc.push(rom[at + i * 12 + 3] ?? 0); }
+  // split byte: only 0/1/2, and moves without power are status (2)
+  let splitOk = true, status0 = 0, n0 = 0, varied = new Set<number>();
+  for (let i = 1; i < count && splitOk; i++) {
+    const v = rom[at + i * 12 + 10];
+    if (v > 2) splitOk = false;
+    varied.add(v);
+    if (power[i] === 0) { n0++; if (v === 2) status0++; }
+  }
+  const split = splitOk && varied.size >= 2 && n0 > 0 && status0 >= n0 * 0.9;
+  const cat: MoveCategory[] = power.map((pw, i) => {
+    if (split) { const v = rom[at + i * 12 + 10]; return v === 0 ? "Physical" : v === 1 ? "Special" : "Status"; }
+    if (pw === 0) return "Status";
+    return types && SPECIAL_TYPES.has(types[i]) ? "Special" : "Physical";
+  });
+  return { power, acc, cat, split };
+}
+
+const isDesc = (s: string | null) => s !== null && s.length >= 4 && s.length <= 220 && /[a-z]/i.test(s);
+
+/** Move descriptions: a pointer table indexed from move 1 (vanilla, CFRU). Picks the run the code points to. */
+function findMoveDescriptions(rom: Uint8Array, moveCount: number): string[] | null {
+  const textAt = (a: number) => { const p = ptrTo(rom, a); return p === null ? null : decodeMessage(rom, p, 300); };
+  const runs: { at: number; len: number }[] = [];
+  for (let a = 0; a + 16 <= rom.length; a += 4) {
+    if (!isDesc(textAt(a)) || !isDesc(textAt(a + 4)) || !isDesc(textAt(a + 8))) continue;
+    let len = 0, misses = 0;
+    for (let i = 0; a + i * 4 + 4 <= rom.length && i < 2100; i++) {
+      if (isDesc(textAt(a + i * 4))) { len = i + 1; misses = 0; } else if (++misses > 1) break;
+    }
+    if (len >= Math.max(150, (moveCount - 1) * 0.7)) runs.push({ at: a, len });
+    a += Math.max(0, len - 1) * 4;
+  }
+  if (!runs.length) return null;
+  const refs = (t: number) => { const v = 0x08000000 + t; let n = 0; for (let a = 0; a + 4 <= rom.length; a += 4) if (u32(rom, a) === v) n++; return n; };
+  // the table may start a word or two into a run (an unrelated text pointer just before it)
+  let best: { at: number; len: number; refs: number } | null = null;
+  for (const r of runs) for (let k = 0; k < 3; k++) {
+    const at = r.at + k * 4, n = refs(at);
+    const score = n * 10000 - Math.abs(r.len - k - (moveCount - 1));
+    if (!best || score > best.refs * 10000 - Math.abs(best.len - (moveCount - 1))) best = { at, len: r.len - k, refs: n };
+  }
+  if (!best) return null;
+  const out = [""];
+  for (let i = 0; i < Math.min(best.len, moveCount - 1 + 50); i++) out.push(textAt(best.at + i * 4) ?? "");
+  return out;
+}
+
 // ---- Species base stats ----
 
 const BASE: Record<number, number[]> = {
@@ -293,6 +350,8 @@ function loadFromGfHeader(rom: Uint8Array, gf: GfHeader, report: string[]) {
   const movePP = movesAll.map((_, i) => (bm ? rom[bm.at + i * 12 + 4] ?? 0 : 0));
   // vanilla-layout battle moves keep the type at +2, with vanilla type ids
   const moveTypes = bm ? movesAll.map((_, i) => (i === 0 ? "" : vanillaType(rom[bm.at + i * 12 + 2] ?? 0))) : null;
+  const details = bm ? battleDetails(rom, bm.at, movesAll.length, moveTypes) : null;
+  const moveDesc = findMoveDescriptions(rom, movesAll.length);
   const info: (SpeciesInfo | null)[] = sp.map(() => null);
   const bs = { at: gf.speciesInfo + 28, stride: 28 };
   for (let i = 1; i < sp.length; i++) {
@@ -306,7 +365,7 @@ function loadFromGfHeader(rom: Uint8Array, gf: GfHeader, report: string[]) {
     };
   }
   report.push(`${sp.length - 1} species`, `${movesAll.length - 1} moves`, `${itemsAll.length - 1} items`, `${abilitiesAll.length - 1} abilities`, "read via the ROM's GF header");
-  return { sp, moves: movesAll, movePP, moveTypes, items: itemsAll, abilities: abilitiesAll, info, bs };
+  return { sp, moves: movesAll, movePP, moveTypes, details, moveDesc, items: itemsAll, abilities: abilitiesAll, info, bs };
 }
 
 export interface RomLoadResult {
@@ -335,12 +394,14 @@ function loadTables(rom: Uint8Array): RomLoadResult {
   // Vanilla-layout ROMs keep species names in their own table; expansion leaves that pointer empty.
   const viaHeader = gf && gf.speciesNames !== null ? loadFromGfHeader(rom, gf, report) : null;
   if (viaHeader) {
-    const { sp, moves, movePP, moveTypes, items, abilities, info, bs } = viaHeader;
+    const { sp, moves, movePP, moveTypes, details, moveDesc, items, abilities, info, bs } = viaHeader;
     const shedinja = sp.findIndex(n => norm(n) === "SHEDINJA");
     return {
       data: {
         id: `rom-${header.code}-${header.title}`, label: `From ROM: ${header.title || header.code}`, source: "rom",
-        species: sp, nat: sp.map(() => 0), info, moves, movePP, moveTypes: moveTypes ?? undefined, items, abilities, shedinja: shedinja > 0 ? shedinja : 303,
+        species: sp, nat: sp.map(() => 0), info, moves, movePP, moveTypes: moveTypes ?? undefined,
+        movePower: details?.power, moveAcc: details?.acc, moveCat: details?.cat, moveDesc: moveDesc ?? undefined,
+        items, abilities, shedinja: shedinja > 0 ? shedinja : 303,
         notes: [],
       },
       header, report, record: bs, gf,

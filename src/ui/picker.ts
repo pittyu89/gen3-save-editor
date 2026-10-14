@@ -11,6 +11,10 @@ export interface PickOption {
   type?: string;
   /** Icon as a data URL; called only when the row becomes visible. */
   icon?: () => string | null;
+  /** Second line under the label (a description, abilities). */
+  sub?: string;
+  /** Extra content on the right of the row (category, power, totals). */
+  right?: () => Node | null;
 }
 
 export interface PickerOpts {
@@ -19,6 +23,9 @@ export interface PickerOpts {
   current: number;
   onPick: (v: number) => void;
   iconSize?: "sm" | "lg";
+  /** When set, tapping a row shows this preview with a confirm button instead of picking at once. */
+  preview?: (v: number) => Node;
+  confirmLabel?: (v: number) => string;
 }
 
 const MAX_ROWS = 1200;
@@ -44,18 +51,20 @@ export function openPicker(o: PickerOpts) {
     const nq = norm(q.trim());
     const idx: number[] = [];
     o.options.forEach((opt, i) => { if (!nq || norm(`${opt.meta ?? ""} ${opt.label}`).includes(nq)) idx.push(i); });
+    if (!idx.length && nq) o.options.forEach((opt, i) => { if (opt.sub && norm(opt.sub).includes(nq)) idx.push(i); });
     const shown = idx.slice(0, MAX_ROWS);
     list.replaceChildren(...shown.map(i => {
       const opt = o.options[i];
       return h("li", {
-        class: `pickrow ${opt.value === o.current ? "on" : ""}`, role: "option", "aria-selected": opt.value === o.current ? "true" : "false",
-        tabindex: "0", "data-type": opt.type ?? "none",
-        onclick: () => pick(opt.value),
-        onkeydown: (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(opt.value); } },
+        class: `pickrow ${opt.value === o.current ? "on" : ""} ${opt.value === chosen ? "chosen" : ""}`, role: "option", "aria-selected": opt.value === (chosen ?? o.current) ? "true" : "false",
+        tabindex: "0", "data-type": opt.type ?? "none", "data-v": String(opt.value),
+        onclick: () => choose(opt.value),
+        onkeydown: (e: KeyboardEvent) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); choose(opt.value); } },
       },
         opt.icon ? h("span", { class: `pkicon ${o.iconSize ?? "sm"}`, "data-i": String(i), "aria-hidden": "true" }) : null,
         opt.meta ? h("span", { class: "pkmeta mono" }, opt.meta) : null,
-        h("span", { class: "pklabel" }, opt.label));
+        h("span", { class: "pkbody" }, h("span", { class: "pklabel" }, opt.label), opt.sub ? h("span", { class: "pksub" }, opt.sub) : null),
+        opt.right ? h("span", { class: "pkright" }, opt.right()) : null);
     }));
     count.textContent = idx.length > MAX_ROWS ? `Showing ${MAX_ROWS} of ${idx.length}. Type to narrow it down.` : idx.length ? "" : "No matches.";
     observer = new IntersectionObserver(entries => {
@@ -71,9 +80,23 @@ export function openPicker(o: PickerOpts) {
       if (e.key === "ArrowDown") { e.preventDefault(); list.querySelector<HTMLElement>(".pickrow")?.focus(); }
     },
   }) as HTMLInputElement;
-  const dialog = h("div", { class: "picker", role: "dialog", "aria-modal": "true", "aria-label": o.title },
+  const previewBox = h("div", { class: "pickpreview", hidden: true });
+  let chosen: number | null = null;
+  function choose(v: number) {
+    if (!o.preview) { pick(v); return; }
+    chosen = v;
+    list.querySelectorAll(".pickrow.chosen").forEach(el => el.classList.remove("chosen"));
+    list.querySelector(`.pickrow[data-v="${v}"]`)?.classList.add("chosen");
+    previewBox.hidden = false;
+    previewBox.replaceChildren(o.preview(v),
+      h("div", { class: "row pickconfirm" },
+        h("button", { class: "btn", onclick: () => { chosen = null; previewBox.hidden = true; list.querySelectorAll(".pickrow.chosen").forEach(el => el.classList.remove("chosen")); } }, "Back"),
+        h("button", { class: "btn primary", onclick: () => pick(v) }, o.confirmLabel ? o.confirmLabel(v) : "Choose")));
+    previewBox.scrollTop = 0;
+  }
+  const dialog = h("div", { class: `picker ${o.preview ? "haspreview" : ""}`, role: "dialog", "aria-modal": "true", "aria-label": o.title },
     h("div", { class: "pickhead" }, h("strong", {}, o.title), h("button", { class: "btn small", onclick: () => close() }, "Close")),
-    search, count, list);
+    search, count, list, previewBox);
   const wrap = h("div", { class: "pickwrap", onclick: (e: Event) => { if (e.target === wrap) close(); } }, dialog);
   const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
   function close() {
