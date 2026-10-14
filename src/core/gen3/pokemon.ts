@@ -6,7 +6,7 @@
 //   cfru-box    CFRU PC Pokémon: 58-byte compressed, unencrypted (src/pokemon_storage_system.c)
 // Party records add 20 bytes (status, level, HP, stats) after the 80-byte box record.
 import { u8, u16, u32, w8, w16, w32 } from "../binary";
-import { decodeText, encodeText } from "../text";
+import { decodeText, encodeText, decodeStrict } from "../text";
 import { data, isValidSpecies, expForLevel, levelFromExp } from "../data";
 
 export const BOX_SIZE = 80;
@@ -194,8 +194,14 @@ function decodeFull(b: Uint8Array, o: number, s: FullSpec): Pokemon | null {
   const hdr = b.subarray(o, o + 0x20);
   let nickname = decodeText(b, o + 8, 10);
   if (s.nick11 && nickname.length === 10) {
-    const extra = new Uint8Array([getBits(sec, s.nick11), getBits(sec, s.nick12!), 0xff]);
-    nickname += decodeText(extra, 0, 2);
+    // Characters 11-12 live in spare bits; older expansion releases leave junk there, so stop at anything unprintable.
+    let add = "";
+    for (const c of [getBits(sec, s.nick11), getBits(sec, s.nick12!)]) {
+      const t = c === 0xff ? null : decodeStrict(new Uint8Array([c, 0xff]), 0, 2);
+      if (!t) break;
+      add += t;
+    }
+    nickname += add.replace(/ +$/, "");
   }
   const ivw = u32(sec, 40);
   const abilityNum = s.ability.kind === "cfru"

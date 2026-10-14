@@ -8,3 +8,4 @@ export * from "./gen3/pokemon";
 export * from "./gen3/save";
 export * from "./rom";
 export * from "./sprites";
+export * from "./repair";

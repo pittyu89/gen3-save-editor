@@ -2,7 +2,7 @@ import * as C from "../core";
 import { h, mount, select, num, field } from "./dom";
 
 type Sel = { where: "party"; i: number } | { where: "box"; box: number; i: number } | null;
-type View = "trainer" | "party" | "box";
+type View = "trainer" | "party" | "box" | "repair";
 
 const st = {
   save: null as C.ParsedSave | null,
@@ -25,6 +25,7 @@ const st = {
   fileMenu: false,                   // phone: file options expanded
   rememberRom: true,
   booting: true,
+  repairPick: null as Set<string> | null, // chosen fixes; null = the recommended ones
 };
 
 const isPhone = () => matchMedia("(max-width: 900px)").matches;
@@ -97,7 +98,7 @@ function setAt(sel: NonNullable<Sel>, m: C.Pokemon | null) {
   }
 }
 
-function touch() { st.dirty = true; st.confirmExport = null; renderAll(); }
+function touch() { st.dirty = true; st.confirmExport = null; saveVersion++; renderAll(); }
 
 function editMon(fn: (m: C.Pokemon) => void) {
   const m = getSel();
@@ -350,7 +351,7 @@ function renderAll() {
   renderMain();
   renderSide();
   renderBottom();
-  document.body.classList.toggle("sheet-open", st.sheet && isPhone() && !!st.save && st.view !== "trainer");
+  document.body.classList.toggle("sheet-open", st.sheet && isPhone() && !!st.save && st.view !== "trainer" && st.view !== "repair");
 }
 
 function openSheet() { st.sheet = true; }
@@ -407,8 +408,11 @@ function renderTop() {
       st.rom ? null : [fileButton("Load your ROM", "linkish", "rom"), " to show Pokémon sprites."]);
   } else if (romMismatch) {
     banner.hidden = false; banner.className = "banner warn";
-    mount(banner, h("strong", {}, "ROM not used. "), `The loaded ROM (${st.rom!.header.code}) is for a different game than this save, so built-in names are shown. `,
-      fileButton("Load the matching ROM", "linkish", "rom"), ".");
+    const famName = (f: C.Family) => f === "E" ? "Emerald" : f === "FRLG" ? "FireRed" : "Ruby/Sapphire";
+    const romFam = ROM_FAMILY[st.rom!.header.code];
+    mount(banner, h("strong", {}, "Wrong ROM. "),
+      `${romLabel()} is ${romFam ? `a ${famName(romFam)}-based game` : "for a different game"}, but this save is from ${s!.profile.family === "E" ? "an" : "a"} ${famName(s!.profile.family)}-based game, so names, sprites and stats can't be shown. `,
+      fileButton("Load this save's ROM", "linkish", "rom"), ".");
   } else if (hackNoRom) {
     banner.hidden = false; banner.className = "banner";
     mount(banner, h("strong", {}, `${s!.profile.short} save. `),
@@ -465,6 +469,9 @@ function renderNav() {
     h("button", { class: `navitem ${st.view === "party" ? "on" : ""}`, onclick: () => { st.view = "party"; renderAll(); } },
       h("span", { class: "navlabel" }, "Party"),
       h("span", { class: "navmeta" }, `${s.party.length}/6`)),
+    h("button", { class: `navitem ${st.view === "repair" ? "on" : ""}`, onclick: () => openRepair() },
+      h("span", { class: "navlabel" }, "Repair"),
+      h("span", { class: "navmeta" }, repairSummary(s))),
     h("div", { class: "navhead" }, `PC boxes · ${s.boxes.length}`),
     h("div", { class: "boxlist" }, s.boxes.map((b, i) =>
       h("button", { class: `navitem box ${st.view === "box" && st.box === i ? "on" : ""}`, onclick: () => { st.view = "box"; st.box = i; renderAll(); } },
@@ -600,6 +607,7 @@ function renderMain() {
   const s = st.save, main = $("main");
   if (!s) { mount(main, onboarding()); return; }
   if (st.view === "trainer") return mount(main, trainerView(s));
+  if (st.view === "repair") return mount(main, repairView(s));
   if (st.view === "party") {
     const tiles = [];
     for (let i = 0; i < 6; i++) tiles.push(slotTile(s.party[i] ?? null, { where: "party", i }, `Party ${i + 1}`));
@@ -909,15 +917,81 @@ function section(_title: string, ...body: Node[]) {
   return h("div", { class: "secbody", role: "tabpanel" }, body);
 }
 
+// ---------- Repair (cheat and glitch damage) ----------
+
+let scanCache: { save: C.ParsedSave; version: number; scan: C.Scan } | null = null;
+let saveVersion = 0;
+function repairScan(s: C.ParsedSave): C.Scan {
+  if (scanCache && scanCache.save === s && scanCache.version === saveVersion) return scanCache.scan;
+  scanCache = { save: s, version: saveVersion, scan: C.scanSave(s) };
+  return scanCache.scan;
+}
+function repairSummary(s: C.ParsedSave) {
+  const n = repairScan(s).issues.length;
+  return n ? `${n} problem${n > 1 ? "s" : ""}` : "No problems";
+}
+function openRepair() { st.view = "repair"; st.sheet = false; st.repairPick = null; st.fileMenu = false; renderAll(); }
+
+const KIND_TITLES: [C.Issue["kind"], string][] = [
+  ["bad-egg", "Bad Eggs"], ["species", "Glitch Pokémon"], ["item", "Glitch items"], ["move", "Glitch moves"],
+  ["pp", "PP"], ["exp", "EXP and level"], ["stats", "Party stats"], ["ev", "EVs"], ["money", "Money and coins"],
+];
+
+function repairView(s: C.ParsedSave) {
+  const { issues, notes } = repairScan(s);
+  const pick = st.repairPick ?? new Set(issues.filter(i => i.recommended).map(i => i.id));
+  const chosen = issues.filter(i => pick.has(i.id));
+  const setPick = (next: Set<string>) => { st.repairPick = next; renderAll(); };
+  const apply = () => {
+    const n = C.applyIssues(s, chosen);
+    st.repairPick = null; st.sel = null;
+    toast(n ? `Applied ${n} fix${n > 1 ? "es" : ""}. Download the edited save to keep ${n > 1 ? "them" : "it"}.` : "Nothing was changed.", n ? "good" : "");
+    if (n) touch(); else renderAll();
+  };
+  const groups = KIND_TITLES.map(([k, title]) => ({ title, items: issues.filter(i => i.kind === k) })).filter(g => g.items.length);
+  return h("div", { class: "repair" },
+    h("div", { class: "viewhead" }, h("h2", {}, "Repair"), h("span", { class: "muted" }, "Cheat and glitch damage")),
+    h("p", { class: "muted small" }, "Cheat codes often write straight into a save's encrypted Pokémon data. When only the checksum or the Bad Egg flag is wrong, the Pokémon underneath can be restored. When the data itself was scrambled it can't be recovered, and deleting it frees the slot. Nothing changes until you apply, and your original file stays available under Download original."),
+    notes.length ? h("ul", { class: "warnlist" }, notes.map(n => h("li", { class: "info" }, n))) : null,
+    issues.length === 0
+      ? h("div", { class: "card" }, h("p", { class: "okline" }, "No Bad Eggs or other cheat damage found."))
+      : [
+        h("div", { class: "row tight repairbar" },
+          h("button", { class: "btn small", onclick: () => setPick(new Set(issues.filter(i => i.recommended).map(i => i.id))) }, "Recommended"),
+          h("button", { class: "btn small", onclick: () => setPick(new Set(issues.map(i => i.id))) }, "All"),
+          h("button", { class: "btn small", onclick: () => setPick(new Set()) }, "None")),
+        groups.map(g => h("section", { class: "card repairgroup" },
+          h("h3", {}, `${g.title} · ${g.items.length}`),
+          h("ul", { class: "issuelist" }, g.items.map(is => h("li", { class: `issue ${is.remove ? "remove" : ""}` },
+            h("label", { class: "issuecheck" },
+              h("input", { type: "checkbox", checked: pick.has(is.id), onchange: (e: Event) => {
+                const next = new Set(pick); (e.target as HTMLInputElement).checked ? next.add(is.id) : next.delete(is.id); setPick(next);
+              } }),
+              h("span", { class: "issuebody" },
+                h("strong", {}, is.subject),
+                h("span", {}, is.problem),
+                h("span", { class: `issuefix ${is.remove ? "bad" : ""}` }, `Fix: ${is.fix}`)))))))),
+        h("div", { class: "row repairapply" },
+          h("button", { class: "btn primary", disabled: !chosen.length, onclick: apply },
+            chosen.length ? `Apply ${chosen.length} fix${chosen.length > 1 ? "es" : ""}` : "Choose fixes to apply"),
+          chosen.some(i => i.remove) ? h("span", { class: "muted small" }, `${chosen.filter(i => i.remove).length} Pokémon will be deleted.`) : null),
+      ]);
+}
+
 function warningsPanel(s: C.ParsedSave, m: C.Pokemon | null) {
   const list: { tone: string; text: string }[] = [];
-  s.warnings.forEach(w => list.push({ tone: /checksum|missing|different saves|incomplete|probably/i.test(w) ? "bad" : "warn", text: w }));
+  // With another game's ROM loaded the fit score is meaningless; the banner already says to load the right ROM.
+  const wrongRom = !!st.rom && !romFits(s.profile);
+  s.warnings.filter(w => !(wrongRom && /read cleanly/.test(w)))
+    .forEach(w => list.push({ tone: /checksum|missing|different saves|incomplete|probably/i.test(w) ? "bad" : "warn", text: w }));
   if (m && st.sel) C.validatePokemon(m, codecAt(st.sel)).forEach(w => list.push({ tone: "warn", text: w }));
   const bad = [...s.party, ...s.boxes.flatMap(b => b.slots)].filter(x => x && !x.checksumOk).length;
-  if (bad) list.push({ tone: "bad", text: `${bad} Pokémon record${bad > 1 ? "s have" : " has"} a bad checksum and will appear as Bad Eggs. They are kept as they are unless you edit them.` });
+  if (bad) list.push({ tone: "bad", text: `${bad} Pokémon record${bad > 1 ? "s have" : " has"} a bad checksum and will appear as Bad Egg${bad > 1 ? "s" : ""}. Repair can restore or remove them.` });
   s.profile.notes.forEach(n => list.push({ tone: "info", text: n }));
+  const n = repairScan(s).issues.length;
   return h("div", { class: "card checks" },
-    h("h3", {}, "Checks"),
+    h("div", { class: "checkshead" }, h("h3", {}, "Checks"),
+      h("button", { class: `btn small ${n ? "primary" : ""}`, onclick: () => openRepair() }, n ? `Repair ${n} problem${n > 1 ? "s" : ""}` : "Scan for problems")),
     list.length
       ? h("ul", { class: "warnlist" }, list.map(w => h("li", { class: w.tone }, w.text)))
       : h("p", { class: "okline" }, "No problems found in this save."));

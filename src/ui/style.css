@@ -405,3 +405,22 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
 .check.small input { width: 18px; height: 18px; }
 .romchip { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 0.85rem; padding: 8px 10px; border-radius: 8px; background: var(--sunk); overflow-wrap: anywhere; }
 @media (min-width: 901px) { .romchip { display: none; } }
+
+/* Checks header and Repair view */
+.checkshead { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.checkshead h3 { margin: 0; }
+.repair { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.repair > p { margin: 0; line-height: 1.5; }
+.repairgroup h3 { margin: 0; font-size: 0.95rem; }
+.issuelist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.issue { border-radius: var(--r); }
+.issue:hover { background: var(--sunk); }
+.issuecheck { display: flex; gap: 12px; align-items: flex-start; padding: 10px 8px; cursor: pointer; min-height: 44px; }
+.issuecheck input { width: 20px; height: 20px; margin: 2px 0 0; flex: none; accent-color: var(--accent); }
+.issuebody { display: flex; flex-direction: column; gap: 3px; font-size: 0.88rem; line-height: 1.4; min-width: 0; overflow-wrap: anywhere; }
+.issuebody strong { font-size: 0.92rem; }
+.issuefix { color: var(--ok); font-weight: 600; }
+.issuefix.bad { color: var(--bad); }
+.repairapply { position: sticky; bottom: 0; padding: 10px 0; background: var(--bg); align-items: center; gap: 12px; flex-wrap: wrap; }
+.small { font-size: 0.82rem; }
+@media (max-width: 900px) { .repairapply { bottom: 72px; } }

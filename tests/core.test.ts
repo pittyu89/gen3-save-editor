@@ -360,3 +360,103 @@ describe("zip", () => {
 });
 
 void (null as unknown as Pokemon);
+
+import { scanSave, applyIssues } from "../src/core";
+
+describe("full-sector hacks", () => {
+  for (const [base, chunk] of [[E, 0xff4], [PEX, 0xff4], [FR, 0xff0]] as [GameProfile, number][]) {
+    it(`${base.name} saves that use ${chunk.toString(16)} bytes per sector`, () => {
+      const wide: GameProfile = { ...base, chunk, sectionSizes: base.sectionSizes.map(() => chunk) };
+      // index 49 straddles the vanilla 3968-byte boundary of the first storage sector
+      const bytes = buildSave({ profile: wide, party: [makeMon(25, 10)], boxMons: [{ box: 1, slot: 19, mon: makeMon(150, 50) }, { box: 13, slot: 29, mon: makeMon(386, 70) }] });
+      const s = parse(bytes, base);
+      expect(s.chunk).toBe(chunk);
+      expect(s.slot.valid).toBe(true);
+      expect(s.boxes[1].slots[19]?.species).toBe(150);
+      expect(s.boxes[13].slots[29]?.species).toBe(386);
+      expect(s.boxes[13].name).toBe("BOX14");
+      s.boxes[1].slots[19]!.nickname = "MEWTWO"; s.boxes[1].slots[19]!.dirty = true;
+      const out = write(s);
+      expect(verify(out, s.slot.index, base)).toEqual([]);
+      const r = parse(out, base);
+      expect(r.boxes[1].slots[19]?.nickname).toBe("MEWTWO");
+      expect(r.boxes[13].slots[29]?.species).toBe(386);
+    });
+  }
+});
+
+describe("repair", () => {
+  const boxOff = (b: number, s: number) => E.boxSlot(b, s).offset;
+  function damaged() {
+    const bytes = buildSave({ profile: E, money: 50, party: [makeMon(25, 10), makeMon(280, 12)],
+      boxMons: [0, 1, 2, 3, 4].map(i => ({ box: 0, slot: i, mon: makeMon(1 + i, 20) })) });
+    const s = parse(bytes, E);
+    // slot 0: only the stored checksum is wrong (data intact)
+    const st = s.blocks.storage;
+    w16(st, boxOff(0, 0) + 0x1c, u16(st, boxOff(0, 0) + 0x1c) ^ 0x1111);
+    // slot 1: encrypted data scrambled by a cheat
+    for (let k = 0x20; k < 0x50; k++) st[boxOff(0, 1) + k] ^= (k * 37) & 0xff;
+    // slot 2: bad-egg flag set on good data
+    st[boxOff(0, 2) + 0x13] |= 1;
+    for (let i = 0; i < 3; i++) s.boxes[0].slots[i] = decodePokemon(st, boxOff(0, i), false, E.boxCodec);
+    return parse(write(s), E);
+  }
+  it("finds and fixes Bad Eggs", () => {
+    const s = damaged();
+    const issues = scanSave(s).issues;
+    const eggs = issues.filter(i => i.kind === "bad-egg");
+    expect(eggs.map(e => e.id).sort()).toEqual(["b0-0-egg", "b0-1-egg", "b0-2-egg"]);
+    expect(eggs.find(e => e.id === "b0-0-egg")!.remove).toBeFalsy();
+    expect(eggs.find(e => e.id === "b0-1-egg")!.remove).toBe(true);
+    expect(eggs.find(e => e.id === "b0-2-egg")!.remove).toBeFalsy();
+    applyIssues(s, issues.filter(i => i.recommended));
+    expect(scanSave(s).issues.filter(i => i.kind === "bad-egg")).toEqual([]);
+    const r = parse(write(s), E);
+    expect(r.boxes[0].slots[0]?.checksumOk).toBe(true);
+    expect(r.boxes[0].slots[0]?.species).toBe(1);
+    expect(r.boxes[0].slots[1]).toBeNull();
+    expect(r.boxes[0].slots[2]!.flags & 1).toBe(0);
+    expect(r.boxes[0].slots[3]?.species).toBe(4);
+    expect(scanSave(r).issues.filter(i => i.kind === "bad-egg")).toEqual([]);
+  });
+  it("fixes glitch items, moves, PP, EXP and money", () => {
+    setData({ ...VANILLA, source: "rom" }); // table checks need the game's own tables
+    const s = parse(buildSave({ profile: E, party: [makeMon(25, 10)], boxMons: [{ box: 0, slot: 0, mon: makeMon(4, 10) }] }), E);
+    const m = s.boxes[0].slots[0]!;
+    m.heldItem = 500; m.moves = [33, 900, 0, 0]; m.pp = [99, 5, 0, 0]; m.exp = 9_999_999; m.dirty = true;
+    s.party[0].party!.hp = 999; s.party[0].dirty = true;
+    s.trainer.money = 5_000_000;
+    const issues = scanSave(s).issues;
+    expect(issues.map(i => i.kind).sort()).toEqual(["exp", "item", "money", "move", "stats"]);
+    applyIssues(s, issues);
+    const r = parse(write(s), E);
+    const x = r.boxes[0].slots[0]!;
+    expect(x.heldItem).toBe(0);
+    expect(x.moves).toEqual([33, 0, 0, 0]);
+    expect(levelOf(x)).toBe(100);
+    expect(r.party[0].party!.hp).toBe(r.party[0].party!.stats[0]);
+    expect(r.trainer.money).toBe(999999);
+    expect(scanSave(r).issues.filter(i => i.kind === "pp")).toHaveLength(1);
+  });
+  it("skips table checks without ROM tables and when the ROM doesn't match", () => {
+    const s = parse(buildSave({ profile: E, party: [makeMon(25, 10)], boxMons: [0, 1, 2, 3].map(i => ({ box: 0, slot: i, mon: makeMon(1 + i, 10, { heldItem: 600 }) })) }), E);
+    let r = scanSave(s);
+    expect(r.issues).toEqual([]);
+    expect(r.notes.length).toBe(1);
+    setData({ ...VANILLA, source: "rom", species: VANILLA.species.slice(0, 2) });
+    r = scanSave(s);
+    expect(r.issues.filter(i => i.kind !== "bad-egg")).toEqual([]);
+    expect(r.notes[0]).toMatch(/isn't the one/);
+  });
+  it("never empties the party", () => {
+    const s = parse(buildSave({ profile: E, party: [makeMon(25, 10)] }), E);
+    const sb1 = s.blocks.sb1, o = E.offsets.sb1.party;
+    for (let k = 0x20; k < 0x50; k++) sb1[o + k] ^= 0x5a;
+    s.party[0] = decodePokemon(sb1, o, true, E.partyCodec)!;
+    const r = parse(write(s), E);
+    const issues = scanSave(r).issues;
+    expect(issues[0].recommended).toBe(false);
+    applyIssues(r, issues);
+    expect(r.party).toHaveLength(1);
+  });
+});

@@ -1,7 +1,7 @@
 // Gen III flash save: 32 sectors of 0x1000 bytes. Slot A = sectors 0-13, slot B = 14-27.
 // Footer (from include/save.h): 0xFF4 id u16, 0xFF6 checksum u16, 0xFF8 signature u32, 0xFFC counter u32.
 import { u16, u32, w16, w32, sectorChecksum } from "../binary";
-import { decodeText, encodeText } from "../text";
+import { decodeText, encodeText, decodeStrict } from "../text";
 import { GameProfile, PROFILES, Family, Block, Loc, getProfile, profilesForFamily } from "../profiles";
 import { Pokemon, decodePokemon, encodePokemon, clearRecord, codecInfo, plausibility, PARTY_SIZE } from "./pokemon";
 import { GameData, data, setData, VANILLA, nationalFallback, cfruFallback } from "../data";
@@ -51,6 +51,8 @@ export interface ParsedSave {
   boxes: Box[];
   warnings: string[];
   fit: Fit;
+  /** Data bytes per sector this save actually uses (may be larger than the profile's in some hacks). */
+  chunk: number;
 }
 
 export interface ProfileRank { id: string; name: string; fit: Fit }
@@ -121,7 +123,35 @@ function sizesFor(profiles: GameProfile[]): number[][] {
   // The game zero-fills each sector before writing, so the full chunk length is equivalent to the
   // struct size. No other lengths are guessed, to avoid false matches on mostly-empty sectors.
   return Array.from({ length: SECTORS_PER_SLOT }, (_, id) =>
-    [...new Set(profiles.flatMap(p => [p.sectionSizes[id], p.chunk]).concat(SECTOR_DATA))]);
+    [...new Set(profiles.flatMap(p => [p.sectionSizes[id], p.chunk]).concat(SECTOR_DATA, MAX_CHUNK, FULL_CHUNK))]);
+}
+
+/** Some hacks use more of each sector than vanilla's 3968 bytes: 0xFF0 (CFRU-style save expansion) or
+ *  every byte up to the footer (0xFF4). Data past a boundary rules the smaller sizes out; when that
+ *  leaves a choice, the box names at the end of storage (section 13) show which alignment is right. */
+export const FULL_CHUNK = 0xff4;
+export function detectChunk(bytes: Uint8Array, slot: SlotInfo): number {
+  let min = SECTOR_DATA;
+  for (const s of slot.sectors) {
+    if (s.id < 1 || s.id > 12) continue;
+    const base = s.physical * SECTOR_SIZE;
+    for (let i = SECTOR_DATA; i < FULL_CHUNK; i++) if (bytes[base + i]) min = Math.max(min, i >= MAX_CHUNK ? FULL_CHUNK : MAX_CHUNK);
+  }
+  const candidates = [SECTOR_DATA, MAX_CHUNK, FULL_CHUNK].filter(c => c >= min);
+  if (candidates.length === 1) return candidates[0];
+  const s13 = slot.sectors.find(s => s.id === 13);
+  if (!s13) return candidates[0];
+  const score = (c: number) => {
+    const at = s13.physical * SECTOR_SIZE + 0x8344 - 8 * c;
+    let n = 0;
+    for (let b = 0; b < 14; b++) { const t = decodeStrict(bytes, at + b * 9, 9); if (t && t.trim()) n++; }
+    const wp = s13.physical * SECTOR_SIZE + 0x83c2 - 8 * c;
+    for (let b = 0; b < 14; b++) if (bytes[wp + b] < 16) n += 0.25;
+    return n;
+  };
+  let best = candidates[0], bestScore = score(best);
+  for (const c of candidates.slice(1)) { const v = score(c); if (v > bestScore) { best = c; bestScore = v; } }
+  return best;
 }
 
 function newer(a: number, b: number): boolean {
@@ -239,7 +269,8 @@ export function parse(input: Uint8Array, profile: GameProfile, slotIndex?: 0 | 1
   if (!slot.complete) throw new Error(`Save slot ${idx === 0 ? "A" : "B"} is incomplete and cannot be opened.`);
   const warnings = [...messages, ...slot.problems];
 
-  const c = profile.chunk;
+  // CFRU's compressed boxes fix its layout; other profiles follow what the save itself uses.
+  const c = profile.engine === "cfru" ? profile.chunk : Math.max(profile.chunk, detectChunk(bytes, slot));
   const blocks: Record<Block, Uint8Array> = {
     sb2: gather(bytes, slot, 0, 0, c), sb1: gather(bytes, slot, 1, 4, c), storage: gather(bytes, slot, 5, 13, c),
     ext: gatherExt(bytes, profile),
@@ -293,7 +324,7 @@ export function parse(input: Uint8Array, profile: GameProfile, slotIndex?: 0 | 1
   const cb = at(blocks, profile.currentBox)[profile.currentBox.offset];
   return {
     original: input, bytes, profile, slot, slots, blocks, securityKey, trainer, party,
-    currentBox: cb < profile.boxCount ? cb : 0, boxes, warnings, fit,
+    currentBox: cb < profile.boxCount ? cb : 0, boxes, warnings, fit, chunk: c,
   };
 }
 
@@ -318,14 +349,15 @@ export function write(save: ParsedSave): Uint8Array {
   for (let i = 0; i < 6; i++) {
     const off = o1.party + i * PARTY_SIZE;
     if (i < save.party.length) encodePokemon(save.party[i], sb1, off, true, p.partyCodec);
-    else clearRecord(sb1, off, PARTY_SIZE);
+    else if (decodePokemon(sb1, off, true, p.partyCodec)) clearRecord(sb1, off, PARTY_SIZE); // leave already-empty slots byte-identical
   }
   const recSize = codecInfo(p.boxCodec).size;
   save.boxes.forEach((box, b) => {
     box.slots.forEach((m, s) => {
       const l = p.boxSlot(b, s), blk = blocks[l.block];
       if (l.offset + recSize > blk.length) return;
-      if (m) encodePokemon(m, blk, l.offset, false, p.boxCodec); else clearRecord(blk, l.offset, recSize);
+      if (m) encodePokemon(m, blk, l.offset, false, p.boxCodec);
+      else if (decodePokemon(blk, l.offset, false, p.boxCodec)) clearRecord(blk, l.offset, recSize);
     });
     const nl = p.boxName(b), wl = p.wallpaper(b);
     if (decodeText(blocks[nl.block], nl.offset, 8) !== box.name) encodeText(box.name, blocks[nl.block], nl.offset, 9);
@@ -333,13 +365,16 @@ export function write(save: ParsedSave): Uint8Array {
   });
 
   const out = save.bytes.slice();
-  scatter(out, save.slot, 0, sb2, p.chunk);
-  scatter(out, save.slot, 1, sb1, p.chunk);
-  scatter(out, save.slot, 5, blocks.storage, p.chunk);
+  const c = save.chunk ?? p.chunk;
+  scatter(out, save.slot, 0, sb2, c);
+  scatter(out, save.slot, 1, sb1, c);
+  scatter(out, save.slot, 5, blocks.storage, c);
   p.extSectors.forEach((sec, i) => out.set(blocks.ext.subarray(i * p.chunk, (i + 1) * p.chunk), sec * SECTOR_SIZE));
   for (const s of save.slot.sectors) {
     const base = s.physical * SECTOR_SIZE;
-    const len = s.checksumLength || p.sectionSizes[s.id];
+    let len = s.checksumLength || p.sectionSizes[s.id];
+    // In hacks that fill the whole sector, edits can reach past 3968 bytes; the checksum must cover them.
+    if (c > SECTOR_DATA && len === SECTOR_DATA) len = c;
     w16(out, base + 0xff6, sectorChecksum(out, base, len));
   }
   return out;
