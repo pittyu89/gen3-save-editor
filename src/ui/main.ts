@@ -1055,6 +1055,7 @@ function baseStats(species: number) {
 }
 
 const openDescs = new Set<string>(); // learnable moves whose description is expanded
+const openGroups = new Map<string, boolean>(); // learnable-move groups the user opened or closed
 /** Moves this species learns, with a button to teach each one. */
 function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
   const d = C.data(), L = d.learn;
@@ -1080,8 +1081,10 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
       teachBtn(mv),
       open ? h("div", { class: "lrdesc" }, moveStats(mv), desc ? h("p", { class: "mvdesc" }, desc) : null) : null);
   };
-  const group = (title: string, items: Node[], open: boolean, empty: string) =>
-    h("details", { class: "learngroup", open },
+  // remember which groups are open, since every edit re-renders the panel
+  const group = (title: string, items: Node[], openByDefault: boolean, empty: string) =>
+    h("details", { class: "learngroup", open: openGroups.get(title) ?? openByDefault,
+      ontoggle: (e: Event) => openGroups.set(title, (e.currentTarget as HTMLDetailsElement).open) },
       h("summary", {}, `${title} · ${items.length}`),
       items.length ? h("ul", {}, items) : h("p", { class: "note" }, empty));
   const sortedTeach = teach ? [...teach].sort((a, b) => (L.tmLabel.get(a) ?? "~" + C.moveName(a)).localeCompare(L.tmLabel.get(b) ?? "~" + C.moveName(b))) : null;
