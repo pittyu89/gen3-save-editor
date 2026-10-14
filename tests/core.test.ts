@@ -513,3 +513,22 @@ describe("learnsets", () => {
     expect(L.egg[4]).toEqual([]);
   });
 });
+
+import { createPokemon } from "../src/core";
+
+describe("adding Pokémon", () => {
+  it("creates a valid Pokémon that survives a write", () => {
+    const s = parse(buildSave({ profile: E, party: [makeMon(25, 10)] }), E);
+    const m = createPokemon(150, 50, E, s.trainer, false);
+    expect(levelOf(m)).toBe(50);
+    expect(m.otName).toBe(s.trainer.name);
+    s.boxes[2].slots[7] = m;
+    const p = createPokemon(4, 12, E, s.trainer, true);
+    s.party.push(p);
+    const r = parse(write(s), E);
+    expect(r.boxes[2].slots[7]?.species).toBe(150);
+    expect(r.boxes[2].slots[7]?.checksumOk).toBe(true);
+    expect(r.party[1].species).toBe(4);
+    expect(r.party[1].party!.level).toBe(12);
+  });
+});

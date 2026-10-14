@@ -1,5 +1,6 @@
 import * as C from "../core";
 import { h, mount, select, num, field } from "./dom";
+import { openPicker, pickButton, closePicker, type PickOption } from "./picker";
 
 type Sel = { where: "party"; i: number } | { where: "box"; box: number; i: number } | null;
 type View = "trainer" | "party" | "box" | "repair";
@@ -22,7 +23,8 @@ const st = {
   sheet: false,                      // phone: editor sheet open
   moving: null as Sel,               // tap-to-move source
   edTab: "info" as "info" | "moves" | "stats" | "ot",
-  teachSlot: null as number | null,  // move slot that "Teach" writes to; null = first empty, else the last
+  teachSlot: null as number | null,
+  addLevel: 5,  // move slot that "Teach" writes to; null = first empty, else the last
   fileMenu: false,                   // phone: file options expanded
   rememberRom: true,
   booting: true,
@@ -535,7 +537,19 @@ const ballIcon = (m: C.Pokemon, cls = "itemicon") => {
 };
 /** Type of a move, when the ROM's move table gave it. */
 const moveType = (mv: number) => (mv ? C.data().moveTypes?.[mv] : undefined) || undefined;
-const moveTypeBadge = (mv: number) => { const t = moveType(mv); return t ? h("span", { class: "typebadge small", "data-type": t }, t) : null; };
+
+// ---------- Pickers ----------
+const speciesPickOptions = (): PickOption[] =>
+  options().species.map(([v]) => ({ value: v, label: C.speciesName(v), meta: dexNo(v), icon: () => spriteURL(v, false) }));
+const itemPickOptions = (max: number): PickOption[] =>
+  options().items.filter(([v]) => v <= max).map(([v, label]) => ({ value: v, label, icon: () => itemIconURL(v) }));
+const ballPickOptions = (max: number): PickOption[] =>
+  C.ballChoices(st.save!.profile.engine).filter(([v]) => v <= max).map(([v, label]) => ({ value: v, label, icon: () => { const it = C.ballItem(st.save!.profile.engine, v); return it === null ? null : itemIconURL(it); } }));
+const movePickOptions = (max: number): PickOption[] =>
+  options().moves.filter(([v]) => v <= max).map(([v, label]) => ({ value: v, label: v ? label : "— (no move)", type: moveType(v) }));
+function pickSpecies(title: string, current: number, onPick: (v: number) => void) {
+  openPicker({ title, options: speciesPickOptions(), current, onPick, iconSize: "lg" });
+}
 
 const svg = (body: string, cls: string, label?: string) => {
   const span = h("span", { class: cls, "aria-hidden": label ? undefined : "true", role: label ? "img" : undefined, "aria-label": label });
@@ -584,7 +598,7 @@ function slotTile(m: C.Pokemon | null, sel: NonNullable<Sel>, label: string) {
     onclick: () => {
       if (st.moving) { const from = st.moving; st.moving = null; swap(from, sel); return; }
       st.sel = sel; st.armDelete = false; st.teachSlot = null;
-      if (isPhone() && (m || st.clip)) openSheet();
+      if (isPhone()) openSheet();
       renderAll();
     },
     ondragstart: (e: DragEvent) => { e.dataTransfer!.setData("text/plain", JSON.stringify(sel)); e.dataTransfer!.effectAllowed = "move"; },
@@ -770,12 +784,28 @@ function renderSide() {
   mount(side, ...parts);
 }
 
+function addPokemon(sel: NonNullable<Sel>) {
+  const s = st.save!;
+  pickSpecies("Add a Pokémon", 0, sp => {
+    const target: NonNullable<Sel> = sel.where === "party" ? { where: "party", i: Math.min(sel.i, s.party.length) } : sel;
+    const m = C.createPokemon(sp, st.addLevel, s.profile, s.trainer, target.where === "party");
+    setAt(target, m);
+    st.sel = target; st.edTab = "info"; st.teachSlot = null; st.sheet = isPhone();
+    toast(`Added ${C.speciesName(sp)} at level ${st.addLevel}.`, "good");
+    touch();
+  });
+}
+
 function emptySlotPanel() {
   const sel = st.sel;
   return h("div", { class: "card editor" },
     h("div", { class: "sheetbar phone-flex" }, h("span", {}, "Empty slot"), h("button", { class: "btn small", onclick: closeSheet }, "Close")),
     h("h3", {}, sel ? "Empty slot" : "Nothing selected"),
-    h("p", { class: "muted" }, sel ? "This slot is empty. Paste a copied Pokémon here, or drag one in." : "Select a Pokémon to edit it."),
+    h("p", { class: "muted" }, sel ? "Add a new Pokémon here, paste a copied one, or drag one in." : "Select a Pokémon to edit it, or an empty slot to add one."),
+    sel ? h("div", { class: "addrow" },
+      field("Level", "addLevel", num("addLevel", st.addLevel, 1, 100, v => { st.addLevel = v; })),
+      h("button", { class: "btn primary", onclick: () => addPokemon(sel) }, "Add Pokémon")) : null,
+    sel ? h("p", { class: "note" }, "It gets random IVs and personality, the moves it would know at that level, and you as its trainer. You can change everything afterwards.") : null,
     sel && st.clip ? h("button", { class: "btn primary", onclick: () => { setAt(sel, Object.assign(C.cloneMon(st.clip!), { dirty: true })); st.sheet = isPhone(); touch(); } }, `Paste ${C.speciesName(st.clip.species)}`) : null);
 }
 
@@ -828,7 +858,8 @@ function editor(m: C.Pokemon) {
   };
 
   const itemControl = opts.items.length > 1
-    ? select("mItem", m.heldItem, withCurrent(opts.items, m.heldItem, C.itemName(m.heldItem)), v => editMon(x => { x.heldItem = Number(v); }))
+    ? pickButton("mItem", m.heldItem ? C.itemName(m.heldItem) : "None", { icon: itemIconURL(m.heldItem), onclick: () =>
+        openPicker({ title: "Held item", options: itemPickOptions(ci.maxItem), current: m.heldItem, onPick: v => editMon(x => { x.heldItem = v; }) }) })
     : num("mItem", m.heldItem, 0, ci.maxItem, v => editMon(x => { x.heldItem = v; }));
 
   const tabBtn = (k: typeof st.edTab, label: string) =>
@@ -858,8 +889,7 @@ function editor(m: C.Pokemon) {
 
     st.edTab !== "info" ? null : section("Identity",
       h("div", { class: "fields cols2" },
-        field("Species", "mSpecies", select("mSpecies", m.species, withCurrent(opts.species, m.species, `Unknown (${m.species})`), v => {
-          const ns = Number(v);
+        field("Species", "mSpecies", pickButton("mSpecies", C.speciesName(m.species), { icon: spriteURL(m.species, false), meta: dexNo(m.species), onclick: () => pickSpecies("Species", m.species, ns => {
           editMon(x => {
             const keepLvl = C.levelOf(x);
             if (x.nickname === defaultName(x.species)) x.nickname = defaultName(ns).slice(0, ci.nickLen);
@@ -868,16 +898,16 @@ function editor(m: C.Pokemon) {
             if (ab && !ab[x.abilityNum]) x.abilityNum = isCfru ? x.pid & 1 : 0;
             if (keepLvl !== null) C.setLevel(x, keepLvl);
           });
-        })),
+        }) })),
         nameInput("mNick", "Nickname", m.nickname, ci.nickLen, v => { m.nickname = v; }),
         field("Level", "mLevel", C.canSetLevel(m)
           ? num("mLevel", lvl ?? 1, 1, 100, v => editMon(x => { C.setLevel(x, v); }))
           : h("input", { id: "mLevel", value: lvl ?? "?", disabled: true }),
           C.canSetLevel(m) ? `EXP ${m.exp.toLocaleString()}` : "Growth rate unknown; load the ROM to change level"),
-        field("Held item", "mItem", h("div", { class: "withicon" }, itemIcon(m.heldItem) ?? h("span", { class: "itemicon empty" }), itemControl)),
-        field("Poké Ball", "mBall", h("div", { class: "withicon" }, ballIcon(m) ?? h("span", { class: "itemicon empty" }),
-          select("mBall", m.ball, withCurrent(C.ballChoices(st.save!.profile.engine).filter(([v]) => v <= ci.maxBall), m.ball, `Ball ${m.ball}`),
-            v => editMon(x => { x.ball = Number(v); })))),
+        field("Held item", "mItem", itemControl),
+        field("Poké Ball", "mBall", pickButton("mBall", C.ballName(st.save!.profile.engine, m.ball), {
+          icon: (() => { const it = C.ballItem(st.save!.profile.engine, m.ball); return it === null ? null : itemIconURL(it); })(),
+          onclick: () => openPicker({ title: "Poké Ball", options: ballPickOptions(ci.maxBall), current: m.ball, onPick: v => editMon(x => { x.ball = v; }) }) })),
         field("Nature", "mNature", select("mNature", C.nature(m), C.NATURES.map((n, i) => [i, n] as [number, string]),
           v => ci.hasNatureMod ? editMon(x => { x.natureMod = (x.pid % 25) ^ Number(v); }) : reroll({ nature: Number(v) }))),
         field("Ability", "mAbility", abilitySlots.length > 1
@@ -903,10 +933,11 @@ function editor(m: C.Pokemon) {
     st.edTab !== "moves" ? null : section("Moves",
       h("div", { class: "moves" }, [0, 1, 2, 3].map(i => {
         const max = C.maxPP(m.moves[i], m.ppBonuses, i);
-        return h("div", { class: "moverow", "data-type": moveType(m.moves[i]) ?? "none" },
-          select(`mMove${i}`, m.moves[i], withCurrent(opts.moves, m.moves[i], C.moveName(m.moves[i])).filter(([v]) => v <= ci.maxMove), v => editMon(x => {
-            x.moves[i] = Number(v); x.pp[i] = C.maxPP(x.moves[i], x.ppBonuses, i);
-          }), { "aria-label": `Move ${i + 1}` }),
+        return h("div", { class: "moverow" },
+          pickButton(`mMove${i}`, m.moves[i] ? C.moveName(m.moves[i]) : "—", { type: moveType(m.moves[i]) ?? "none", ariaLabel: `Move ${i + 1}: ${m.moves[i] ? C.moveName(m.moves[i]) : "none"}`,
+            onclick: () => openPicker({ title: `Move ${i + 1}`, options: movePickOptions(ci.maxMove), current: m.moves[i], onPick: v => editMon(x => {
+              x.moves[i] = v; x.pp[i] = C.maxPP(v, x.ppBonuses, i);
+            }) }) }),
           ci.storesPP
             ? num(`mPP${i}`, m.pp[i], 0, codec === "pex-modern" ? 127 : 99, v => editMon(x => { x.pp[i] = v; }), { "aria-label": `PP for move ${i + 1}`, class: "pp" })
             : h("span", { class: "muted ppmax" }, "—"),
@@ -1002,8 +1033,8 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
         toast(`${m.nickname || C.speciesName(m.species)} learned ${C.moveName(mv)}.`, "good");
       } }, "Teach");
   const row = (tag: string, mv: number, later = false) =>
-    h("li", { class: `learnrow ${later ? "later" : ""}`, "data-type": moveType(mv) ?? "none" }, h("span", { class: "lrtag mono" }, tag),
-      h("span", { class: "lrname" }, h("span", {}, C.moveName(mv)), moveTypeBadge(mv)), teachBtn(mv));
+    h("li", { class: `learnrow ${later ? "later" : ""}` }, h("span", { class: "lrtag mono" }, tag),
+      h("span", { class: "lrname mvname", "data-type": moveType(mv) ?? "none" }, C.moveName(mv)), teachBtn(mv));
   const group = (title: string, items: Node[], open: boolean, empty: string) =>
     h("details", { class: "learngroup", open },
       h("summary", {}, `${title} · ${items.length}`),

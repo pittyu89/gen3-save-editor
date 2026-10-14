@@ -466,8 +466,50 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
 
 /* Move types */
 .typebadge.small { font-size: 0.6rem; padding: 1px 6px; letter-spacing: 0.04em; flex: none; }
-.moverow[data-type]:not([data-type="none"]) select { border-left: 6px solid var(--slot-type); }
-.learnrow[data-type]:not([data-type="none"]) { box-shadow: inset 4px 0 0 var(--slot-type); }
-.lrname { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.segbtn[data-type]:not([data-type="none"]) { border-left: 5px solid var(--slot-type); }
 .typebadge[data-type="Fairy"] { color: #2a1420; }
+
+/* One move style everywhere: a type-coloured stripe on the left */
+.mvname, .pickbtn.typed, .segbtn { border-left: 6px solid var(--line); }
+.mvname[data-type]:not([data-type="none"]), .pickbtn.typed[data-type]:not([data-type="none"]), .segbtn[data-type]:not([data-type="none"]) { border-left-color: var(--slot-type); }
+.mvname { padding: 6px 8px; border-radius: var(--r); background: var(--surface); }
+.learnrow:nth-child(odd) .mvname { background: var(--bg); }
+
+/* Picker buttons */
+.pickbtn { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r);
+  background: var(--surface); color: inherit; font: inherit; text-align: left; cursor: pointer; min-width: 0; }
+.pickbtn:hover { border-color: var(--accent); }
+.pickbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pbicon { width: 32px; height: 32px; flex: none; object-fit: contain; image-rendering: pixelated; image-rendering: crisp-edges; }
+.pbicon.none { border-radius: 50%; border: 1px dashed var(--line); width: 22px; height: 22px; margin: 5px; }
+#mSpecies .pbicon { width: 40px; height: 40px; margin: -6px 0; }
+.pblabel { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pbchev { color: var(--muted); font-size: 0.8rem; }
+.pkmeta { font-size: 0.75rem; color: var(--muted); flex: none; }
+
+/* Picker dialog */
+body.picking { overflow: hidden; }
+.pickwrap { position: fixed; inset: 0; z-index: 60; background: rgba(0, 0, 0, 0.45); display: grid; place-items: center; padding: 16px; }
+.picker { width: min(460px, 100%); max-height: min(640px, 100%); display: flex; flex-direction: column; gap: 8px; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 12px; padding: 12px; box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35); }
+.pickhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.picksearch { width: 100%; min-height: 44px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--r); background: var(--bg); font-size: 16px; box-sizing: border-box; }
+.pickcount { font-size: 0.8rem; }
+.pickcount:empty { display: none; }
+.picklist { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 120px; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 2px; }
+.pickrow { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 10px; border-radius: var(--r); cursor: pointer; border-left: 6px solid transparent; }
+.pickrow[data-type]:not([data-type="none"]) { border-left-color: var(--slot-type); }
+.pickrow:hover, .pickrow:focus-visible { background: var(--sunk); outline: none; }
+.pickrow.on { background: color-mix(in srgb, var(--accent) 16%, var(--surface)); font-weight: 700; }
+.pkicon { flex: none; display: grid; place-items: center; }
+.pkicon.sm { width: 28px; height: 28px; }
+.pkicon.lg { width: 48px; height: 48px; }
+.pkicon .pkimg { width: 100%; height: 100%; object-fit: contain; image-rendering: pixelated; image-rendering: crisp-edges; }
+.pklabel { min-width: 0; overflow-wrap: anywhere; }
+@media (max-width: 900px) {
+  .pickwrap { place-items: end stretch; padding: 0; }
+  .picker { width: 100%; max-height: 85vh; height: 85vh; border-radius: 16px 16px 0 0; padding-bottom: max(12px, env(safe-area-inset-bottom)); }
+}
+
+/* Add Pokémon */
+.addrow { display: grid; grid-template-columns: 110px minmax(0, 1fr); gap: 10px; align-items: end; }
+.addrow .btn { min-height: 44px; }

@@ -163,38 +163,45 @@ function findTmMoves(rom: Uint8Array, moveCount: number, anchor: number | null):
   return pickReferenced(rom, found);
 }
 
-/** Per-species TM/HM bitfields. Entry 0 (no species) is empty and unused bits stay clear. */
-function bitTableFits(rom: Uint8Array, t: number, n: number, total: number): boolean {
+/** Per-species TM/HM bitfields. Entry 0 (no species) is empty (or all set) and unused bits stay clear.
+ *  Returns how many species the table covers (hacks that add species may not extend it), or 0. */
+function bitTableRun(rom: Uint8Array, t: number, n: number, total: number, checkZero = true): number {
   const stride = total > 64 ? 16 : 8, words = stride / 4;
-  if (t < 0 || t + n * stride > rom.length) return false;
-  for (let w = 0; w < words; w++) if (u32(rom, t + w * 4) !== 0) return false;
+  if (t < 0 || t + stride * 2 > rom.length) return 0;
   const lastWord = Math.floor((total - 1) / 32), usedBits = total - lastWord * 32;
+  const full = (w: number) => (w < lastWord ? 0xffffffff : w === lastWord ? (usedBits === 32 ? 0xffffffff : (2 ** usedBits) - 1) : 0);
+  const e0 = Array.from({ length: words }, (_, w) => u32(rom, t + w * 4));
+  if (checkZero && !e0.every(v => v === 0) && !e0.every((v, w) => v === full(w))) return 0;
   const seen = new Set<string>();
-  let nonzero = 0;
-  for (let s = 1; s < n; s++) {
+  let nonzero = 0, s = 1;
+  for (; s < n && t + (s + 1) * stride <= rom.length; s++) {
     const o = t + s * stride;
-    let any = false; const key: number[] = [];
-    for (let w = 0; w < words; w++) {
+    let any = false, ok = true; const key: number[] = [];
+    for (let w = 0; w < words && ok; w++) {
       const v = u32(rom, o + w * 4); key.push(v);
       if (v) any = true;
-      if (w > lastWord && v) return false;
-      if (w === lastWord && usedBits < 32 && v >>> usedBits) return false;
+      if ((w > lastWord && v) || (w === lastWord && usedBits < 32 && v >>> usedBits)) ok = false;
     }
+    if (!ok) break;
     if (any) { nonzero++; seen.add(key.join(",")); }
   }
-  return nonzero >= (n - 1) * 0.6 && seen.size >= (n - 1) * 0.3;
+  const covered = s - 1;
+  if (covered < Math.min(n - 1, 200)) return 0;
+  return nonzero >= covered * 0.6 && seen.size >= covered * 0.3 ? s : 0;
 }
 
-function findTmTable(rom: Uint8Array, n: number, total: number, anchor: number | null): number | null {
-  if (anchor !== null) { const t = ptr(rom, anchor); if (t !== null && bitTableFits(rom, t, n, total)) return t; }
+function findTmTable(rom: Uint8Array, n: number, total: number, anchor: number | null): { at: number; count: number } | null {
+  if (anchor !== null) { const t = ptr(rom, anchor); if (t !== null) { const c = bitTableRun(rom, t, n, total, false); if (c) return { at: t, count: c }; } } // the code's own pointer: trust its alignment
   const stride = total > 64 ? 16 : 8;
-  const found: { at: number }[] = [];
-  for (let a = 0; a + n * stride <= rom.length; a += 4) {
-    if (u32(rom, a) || u32(rom, a + 4)) continue;
+  const found: { at: number; count: number }[] = [];
+  for (let a = 0; a + 3 * stride <= rom.length; a += 4) {
+    const z = !u32(rom, a) && !u32(rom, a + 4), f = u32(rom, a) === 0xffffffff;
+    if (!z && !f) continue;
     if (!u32(rom, a + stride) && !u32(rom, a + stride + 4)) continue; // species 1 must learn something
-    if (bitTableFits(rom, a, n, total)) { found.push({ at: a }); a += n * stride - 4; }
+    const c = bitTableRun(rom, a, n, total);
+    if (c) { found.push({ at: a, count: c }); a += c * stride - 4; }
   }
-  return pickReferenced(rom, found)?.at ?? null;
+  return pickReferenced(rom, found);
 }
 
 /** The vanilla egg move list (species markers 20000 + species). */
@@ -276,8 +283,8 @@ export function findLearnsets(rom: Uint8Array, speciesCount: number, moveCount: 
     const stride = tm.total > 64 ? 16 : 8;
     const moves = Array.from({ length: tm.total }, (_, i) => u16(rom, tm.at + i * 2));
     moves.forEach((m, i) => res.tmLabel.set(m, i < tm.tms ? `TM${String(i + 1).padStart(2, "0")}` : `HM${String(i - tm.tms + 1).padStart(2, "0")}`));
-    for (let s = 1; s < n; s++) {
-      const o = tmTable + s * stride, list: number[] = [];
+    for (let s = 1; s < Math.min(n, tmTable.count); s++) {
+      const o = tmTable.at + s * stride, list: number[] = [];
       for (let i = 0; i < tm.total; i++) if (u32(rom, o + (i >> 5) * 4) & (1 << (i & 31))) list.push(moves[i]);
       res.teach[s] = list;
     }
