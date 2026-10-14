@@ -450,8 +450,7 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
 .learngroup ul { list-style: none; margin: 0; padding: 0 6px 6px; display: flex; flex-direction: column; }
 .learngroup .note { padding: 0 12px 10px; }
 .learnrow { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: var(--r); min-height: 40px; }
-.learnrow:nth-child(odd) { background: var(--sunk); }
-.learnrow.later .lrname, .learnrow.later .lrtag { opacity: 0.6; }
+.learnrow.later .lrtag { opacity: 0.6; }
 .lrtag { font-size: 0.76rem; color: var(--muted); }
 .lrname { font-size: 0.88rem; min-width: 0; overflow-wrap: anywhere; }
 .known { font-size: 0.76rem; color: var(--ok); font-weight: 700; padding: 0 8px; }
@@ -468,11 +467,23 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
 .typebadge.small { font-size: 0.6rem; padding: 1px 6px; letter-spacing: 0.04em; flex: none; }
 .typebadge[data-type="Fairy"] { color: #2a1420; }
 
-/* One move style everywhere: a type-coloured stripe on the left */
-.mvname, .pickbtn.typed, .segbtn { border-left: 6px solid var(--line); }
-.mvname[data-type]:not([data-type="none"]), .pickbtn.typed[data-type]:not([data-type="none"]), .segbtn[data-type]:not([data-type="none"]) { border-left-color: var(--slot-type); }
-.mvname { padding: 6px 8px; border-radius: var(--r); background: var(--surface); }
-.learnrow:nth-child(odd) .mvname { background: var(--bg); }
+/* One move style everywhere: the whole tile in the move's type colour */
+[data-type] { --type-ink: #fff; }
+[data-type="Electric"], [data-type="Ice"], [data-type="Normal"], [data-type="Ground"], [data-type="Bug"], [data-type="Rock"],
+[data-type="Steel"], [data-type="Flying"], [data-type="Fairy"] { --type-ink: #1d1d16; }
+.mvname { padding: 8px 10px; border-radius: var(--r); background: var(--surface); border: 1px solid var(--line); font-weight: 700; }
+.mvname[data-type]:not([data-type="none"]), .pickbtn.typed[data-type]:not([data-type="none"]), .segbtn[data-type]:not([data-type="none"]),
+.pickrow[data-type]:not([data-type="none"]) {
+  background: var(--slot-type); color: var(--type-ink); border-color: color-mix(in srgb, var(--slot-type) 70%, #000);
+}
+.pickbtn.typed[data-type]:not([data-type="none"]) .pbchev { color: var(--type-ink); opacity: 0.75; }
+.pickbtn.typed { font-weight: 700; }
+.segbtn.on[data-type]:not([data-type="none"]) { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+.pickrow[data-type]:not([data-type="none"]) { margin-bottom: 2px; font-weight: 700; }
+.pickrow[data-type]:not([data-type="none"]):hover, .pickrow[data-type]:not([data-type="none"]):focus-visible { filter: brightness(1.1); }
+.pickrow.on[data-type]:not([data-type="none"]) { box-shadow: inset 0 0 0 3px var(--accent); }
+.learnrow:nth-child(odd) { background: none; }
+.learnrow.later .mvname { opacity: 0.55; }
 
 /* Picker buttons */
 .pickbtn { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 44px; padding: 6px 10px; border: 1px solid var(--line); border-radius: var(--r);
@@ -496,8 +507,7 @@ body.picking { overflow: hidden; }
 .pickcount { font-size: 0.8rem; }
 .pickcount:empty { display: none; }
 .picklist { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; min-height: 120px; overscroll-behavior: contain; display: flex; flex-direction: column; gap: 2px; }
-.pickrow { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 10px; border-radius: var(--r); cursor: pointer; border-left: 6px solid transparent; }
-.pickrow[data-type]:not([data-type="none"]) { border-left-color: var(--slot-type); }
+.pickrow { display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 4px 10px; border-radius: var(--r); cursor: pointer; border: 1px solid transparent; }
 .pickrow:hover, .pickrow:focus-visible { background: var(--sunk); outline: none; }
 .pickrow.on { background: color-mix(in srgb, var(--accent) 16%, var(--surface)); font-weight: 700; }
 .pkicon { flex: none; display: grid; place-items: center; }

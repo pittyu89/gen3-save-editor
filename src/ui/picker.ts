@@ -21,7 +21,7 @@ export interface PickerOpts {
   iconSize?: "sm" | "lg";
 }
 
-const MAX_ROWS = 400;
+const MAX_ROWS = 1200;
 let open: { close: () => void } | null = null;
 
 export function closePicker() { open?.close(); }
