@@ -78,8 +78,21 @@ function findTagTable(rom: Uint8Array, tagOff: number, tagBase: number, size: nu
 }
 
 /** Locates sprite data in a ROM. `species` gives the base-stats record layout for engines that keep pointers there. */
-export function findSpriteTables(rom: Uint8Array, speciesCount: number, record?: { at: number; stride: number }): SpriteTables | null {
-  // 1) Vanilla / CFRU tables
+export function findSpriteTables(rom: Uint8Array, speciesCount: number, record?: { at: number; stride: number },
+  gf?: { frontPics: number | null; normalPalettes: number | null; shinyPalettes: number | null }): SpriteTables | null {
+  // 0) Table pointers from the GF ROM header (vanilla, binary hacks, CFRU)
+  if (gf && gf.frontPics !== null) {
+    const f = gf.frontPics, okFront = [1, 2, 3].every(sp => { const p = ptr(rom, f + sp * 8); return p !== null && rom[p] === 0x10; });
+    const palOk = (t: number | null) => t !== null && [1, 2].every(sp => isLz(rom, ptr(rom, t + sp * 8), 0x20));
+    if (okFront) return {
+      kind: "tables",
+      front: { at: f, stride: 8, ptrOff: 0 },
+      palette: palOk(gf.normalPalettes) ? { at: gf.normalPalettes!, stride: 8, ptrOff: 0, compressed: true } : null,
+      shiny: palOk(gf.shinyPalettes) ? { at: gf.shinyPalettes!, stride: 8, ptrOff: 0, compressed: true } : null,
+      count: speciesCount,
+    };
+  }
+  // 1) Vanilla / CFRU tables found by their tags
   const front = findTagTable(rom, 6, 0, 0x800, a => u16(rom, a + 4) === 0x800);
   if (front >= 0) {
     const pal = findTagTable(rom, 4, 0, 0x20);

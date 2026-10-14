@@ -159,15 +159,110 @@ function findPP(rom: Uint8Array, moveTable: Table | null, count: number): number
   return null;
 }
 
-export interface RomLoadResult { data: GameData; header: RomHeader; report: string[]; record: { at: number; stride: number } | null }
+/** Game Freak's ROM header at 0x08000100 (src/rom_header_gf.c): table pointers and save layout. */
+export interface GfHeader {
+  gameName: string;
+  frontPics: number | null; normalPalettes: number | null; shinyPalettes: number | null;
+  speciesNames: number | null; moveNames: number | null;
+  speciesInfo: number | null; abilityNames: number | null; items: number | null; moves: number | null;
+  pokemonNameLength: number;
+  saveBlock2Size: number; saveBlock1Size: number; partyCountOffset: number; partyOffset: number;
+  trainerIdOffset: number; playerNameOffset: number;
+}
+
+export function readGfHeader(rom: Uint8Array): GfHeader | null {
+  if (rom.length < 0x200) return null;
+  const name = String.fromCharCode(...rom.subarray(0x108, 0x128)).replace(/\0.*$/s, "");
+  if (!/^pokemon /.test(name)) return null;
+  const P = (o: number) => ptrTo(rom, o);
+  return {
+    gameName: name,
+    frontPics: P(0x128), normalPalettes: P(0x130), shinyPalettes: P(0x134),
+    speciesNames: P(0x144), moveNames: P(0x148),
+    speciesInfo: P(0x1bc), abilityNames: P(0x1c0), items: P(0x1c8), moves: P(0x1cc),
+    pokemonNameLength: rom[0x176],
+    saveBlock2Size: u32(rom, 0x188), saveBlock1Size: u32(rom, 0x18c), partyCountOffset: u32(rom, 0x190), partyOffset: u32(rom, 0x194),
+    trainerIdOffset: u32(rom, 0x19c), playerNameOffset: u32(rom, 0x1a0),
+  };
+}
+
+// Vanilla Gen III type ids (CFRU adds Fairy at 0x17; binary hacks usually reuse 9)
+const VANILLA_TYPES = ["Normal","Fighting","Flying","Poison","Ground","Rock","Bug","Ghost","Steel","Fairy","Fire","Water","Grass","Electric","Psychic","Ice","Dragon","Dark"];
+const vanillaType = (v: number) => VANILLA_TYPES[v] ?? (v === 0x17 ? "Fairy" : "Mystery");
+
+/**
+ * Reads a vanilla-layout ROM (the original games, binary hacks, CFRU) through its GF header:
+ * fixed-size name tables and 28-byte base stats, so renamed "fakemon" hacks work too.
+ */
+function loadFromGfHeader(rom: Uint8Array, gf: GfHeader, report: string[]) {
+  if (gf.speciesNames === null || gf.speciesInfo === null) return null;
+  const nameLen = gf.pokemonNameLength >= 10 && gf.pokemonNameLength <= 12 ? gf.pokemonNameLength + 1 : 11;
+  // Tables often sit back to back, so a name table ends where the next known table starts.
+  const starts = [gf.frontPics, gf.normalPalettes, gf.shinyPalettes, gf.speciesNames, gf.moveNames, gf.speciesInfo, gf.abilityNames, gf.items, gf.moves]
+    .filter((x): x is number => x !== null);
+  const capFor = (at: number, stride: number, max: number) => {
+    const next = starts.filter(x => x > at).reduce((a, b) => Math.min(a, b), Infinity);
+    return Math.min(max, Number.isFinite(next) ? Math.floor((next - at) / stride) - 1 : max);
+  };
+  const spT: Table = { kind: "inline", at: gf.speciesNames + nameLen, stride: nameLen, maxLen: nameLen };
+  const sp = readNames(rom, spT, capFor(gf.speciesNames, nameLen, 2047));
+  if (sp.length < 100) return null;
+  // the header table may be shorter than the expanded base stats in some hacks; trust names
+  const mvT: Table | null = gf.moveNames !== null ? { kind: "inline", at: gf.moveNames + 13, stride: 13, maxLen: 13 } : null;
+  const moves = mvT ? readNames(rom, mvT, capFor(gf.moveNames!, 13, 2047)) : [""];
+  const abT: Table | null = gf.abilityNames !== null ? { kind: "inline", at: gf.abilityNames + 13, stride: 13, maxLen: 13 } : null;
+  const abilities = abT ? readNames(rom, abT, capFor(gf.abilityNames!, 13, 1000)) : [""];
+  const itT: Table | null = gf.items !== null ? { kind: "inline", at: gf.items + 44, stride: 44, maxLen: 14 } : null;
+  const items = itT ? readNames(rom, itT, capFor(gf.items!, 44, 1500)) : [""];
+  const movePP = moves.map((_, i) => (gf.moves !== null ? rom[gf.moves + i * 12 + 4] ?? 0 : 0));
+  const info: (SpeciesInfo | null)[] = sp.map(() => null);
+  const bs = { at: gf.speciesInfo + 28, stride: 28 };
+  for (let i = 1; i < sp.length; i++) {
+    const o = gf.speciesInfo + i * 28;
+    if (o + 28 > rom.length) break;
+    const t1 = vanillaType(rom[o + 6]), t2 = vanillaType(rom[o + 7]);
+    info[i] = {
+      bs: Array.from(rom.subarray(o, o + 6)), t: [...new Set([t1, t2])],
+      g: rom[o + 16], gr: rom[o + 19] <= 5 ? rom[o + 19] : null,
+      ab: [rom[o + 22], rom[o + 23] === rom[o + 22] ? 0 : rom[o + 23], rom[o + 26] || 0],
+    };
+  }
+  report.push(`${sp.length - 1} species`, `${moves.length - 1} moves`, `${items.length - 1} items`, `${abilities.length - 1} abilities`, "read via the ROM's GF header");
+  return { sp, moves, movePP, items, abilities, info, bs };
+}
+
+export interface RomLoadResult {
+  data: GameData; header: RomHeader; report: string[];
+  record: { at: number; stride: number } | null;
+  gf: GfHeader | null;
+}
 
 export function loadRomData(rom: Uint8Array): RomLoadResult {
   const header = readRomHeader(rom);
   const report: string[] = [];
   if (!header.isGba) throw new Error("This file isn't a GBA ROM (its header check byte is missing).");
+  const gf = readGfHeader(rom);
+  // Vanilla-layout ROMs keep species names in their own table; expansion leaves that pointer empty.
+  const viaHeader = gf && gf.speciesNames !== null ? loadFromGfHeader(rom, gf, report) : null;
+  if (viaHeader) {
+    const { sp, moves, movePP, items, abilities, info, bs } = viaHeader;
+    const shedinja = sp.findIndex(n => norm(n) === "SHEDINJA");
+    return {
+      data: {
+        id: `rom-${header.code}-${header.title}`, label: `From ROM: ${header.title || header.code}`, source: "rom",
+        species: sp, nat: sp.map(() => 0), info, moves, movePP, items, abilities, shedinja: shedinja > 0 ? shedinja : 303,
+        notes: [],
+      },
+      header, report, record: bs, gf,
+    };
+  }
+  const res = scanRomData(rom, header, report);
+  return { ...res, gf };
+}
 
+function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit<RomLoadResult, "gf"> {
   const spTable = findNameTable(rom, ["Bulbasaur", "Ivysaur", "Venusaur"], 13);
-  if (!spTable) throw new Error("Couldn't find the species name table in this ROM.");
+  if (!spTable) throw new Error("Couldn't find this ROM's Pokémon tables. It may be a hack whose engine this editor doesn't know yet.");
   const sp = readNames(rom, spTable, 2047);
   report.push(`${sp.length - 1} species names`);
 
@@ -244,3 +339,4 @@ export function loadRomData(rom: Uint8Array): RomLoadResult {
   };
   return { data: gameData, header, report, record: bs };
 }
+

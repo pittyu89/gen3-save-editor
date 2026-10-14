@@ -1,5 +1,4 @@
 import * as C from "../core";
-import { buildSave, makeMon } from "../core/fixtures";
 import { h, mount, select, num, field } from "./dom";
 
 type Sel = { where: "party"; i: number } | { where: "box"; box: number; i: number } | null;
@@ -18,12 +17,14 @@ const st = {
   armDelete: false,
   confirmExport: null as string[] | null,
   error: "",
-  rom: null as { data: C.GameData; header: C.RomHeader; report: string[]; fileName: string; bytes: Uint8Array; sprites: C.SpriteTables | null } | null,
+  rom: null as { data: C.GameData; header: C.RomHeader; report: string[]; fileName: string; bytes: Uint8Array; sprites: C.SpriteTables | null; gf: C.GfHeader | null } | null,
   busy: "",
   sheet: false,                      // phone: editor sheet open
   moving: null as Sel,               // tap-to-move source
   edTab: "info" as "info" | "moves" | "stats" | "ot",
   fileMenu: false,                   // phone: file options expanded
+  rememberRom: true,
+  booting: true,
 };
 
 const isPhone = () => matchMedia("(max-width: 900px)").matches;
@@ -32,6 +33,7 @@ const $ = (id: string) => document.getElementById(id)!;
 
 // ---------- Data ----------
 
+const romLabel = () => st.rom ? st.rom.fileName.replace(/\.(gba|bin)$/i, "").replace(/_/g, " ") : "";
 const ROM_FAMILY: Record<string, C.Family> = { AXVE: "RS", AXPE: "RS", BPEE: "E", BPRE: "FRLG", BPGE: "FRLG" };
 /** The loaded ROM's data when it belongs to the same game family as the profile; otherwise built-in data. */
 function romFits(p: C.GameProfile) {
@@ -140,6 +142,7 @@ async function openFile(file: File) {
   let buf: Uint8Array;
   try { buf = await readFile(file); } catch (e) { toast(`Couldn't read ${file.name}: ${(e as Error)?.message ?? "unknown error"}`, "bad"); return; }
   if (buf.length > 0x40000 && buf[0xb2] === 0x96) { await loadRom(buf, file.name); return; }
+  if (!st.rom) { toast("Load your game's ROM first, then open the save.", "bad"); return; }
   loadBytes(buf, file.name, false);
 }
 
@@ -152,6 +155,9 @@ function loadBytes(buf: Uint8Array, name: string, demo: boolean, profileId?: str
     const profile = C.getProfile(profileId ?? det.suggestedProfile!);
     C.setData(dataFor(profile));
     st.save = C.parse(buf, profile, slot);
+    const gf = st.rom && romFits(profile) ? st.rom.gf : null;
+    if (gf && gf.partyOffset && gf.partyOffset !== profile.offsets.sb1.party)
+      st.save.warnings.push(`This ROM puts the party at 0x${gf.partyOffset.toString(16)} in SaveBlock1, but ${profile.name} expects 0x${profile.offsets.sb1.party.toString(16)}. Its save layout differs, so edits may corrupt the save.`);
     st.fileName = name; st.isDemo = demo; st.dirty = false; st.view = "party";
     st.box = st.save.currentBox;
     st.sel = st.save.party.length ? { where: "party", i: 0 } : null;
@@ -176,17 +182,52 @@ function reparse(profileId: string, slot?: 0 | 1) {
   renderAll();
 }
 
-async function loadRom(buf: Uint8Array, name: string) {
+// ---------- Remembering the ROM on this device (IndexedDB; never uploaded) ----------
+
+function idb(): Promise<IDBDatabase | null> {
+  return new Promise(res => {
+    try {
+      const req = indexedDB.open("gen3-save-editor", 1);
+      req.onupgradeneeded = () => req.result.createObjectStore("files");
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => res(null);
+    } catch { res(null); }
+  });
+}
+async function idbPut(key: string, value: unknown) {
+  const db = await idb(); if (!db) return;
+  try { db.transaction("files", "readwrite").objectStore("files").put(value, key); } catch { /* storage unavailable */ }
+}
+async function idbGet<T>(key: string): Promise<T | null> {
+  const db = await idb(); if (!db) return null;
+  return new Promise(res => {
+    try {
+      const r = db.transaction("files").objectStore("files").get(key);
+      r.onsuccess = () => res((r.result as T) ?? null); r.onerror = () => res(null);
+    } catch { res(null); }
+  });
+}
+async function forgetRom() {
+  await idbPut("rom", null);
+  st.rom = null; st.save = null; st.detected = null; st.dirty = false; spriteCache.clear(); optCache = null;
+  toast("ROM forgotten on this device.", "");
+  renderAll();
+}
+
+async function loadRom(buf: Uint8Array, name: string, fromStorage = false) {
   st.busy = "Reading ROM tables…"; renderAll();
   await new Promise(r => setTimeout(r, 30));
   try {
     const res = C.loadRomData(buf);
-    const sprites = (() => { try { return C.findSpriteTables(buf, res.data.species.length, res.record ?? undefined); } catch { return null; } })();
+    const sprites = (() => { try { return C.findSpriteTables(buf, res.data.species.length, res.record ?? undefined, res.gf ?? undefined); } catch { return null; } })();
     st.rom = { ...res, fileName: name, bytes: buf, sprites };
     spriteCache.clear();
     if (!sprites) res.report.push("sprites not found (this ROM may use a newer compression)");
     optCache = null;
-    toast(`Loaded ${res.data.species.length - 1} species, ${res.data.moves.length - 1} moves and ${res.data.items.length - 1} items from ${res.header.title || name}.`, "good");
+    if (!fromStorage) {
+      toast(`Loaded ${res.data.species.length - 1} species, ${res.data.moves.length - 1} moves and ${res.data.items.length - 1} items from ${name.replace(/\.(gba|bin)$/i, "")}.`, "good");
+      if (st.rememberRom) idbPut("rom", { name, bytes: buf });
+    }
     if (st.save) {
       // re-rank engines with the ROM's tables, then reopen with the best one
       const bytes = st.dirty ? C.write(st.save) : st.save.bytes;
@@ -197,32 +238,12 @@ async function loadRom(buf: Uint8Array, name: string) {
       st.detected = det;
     }
   } catch (e) {
-    toast(`Couldn't read that ROM: ${(e as Error).message}`, "bad");
+    if (!fromStorage) toast(`Couldn't read that ROM: ${(e as Error).message}`, "bad");
   }
   st.busy = "";
   renderAll();
 }
 
-function demoSave(): Uint8Array {
-  const profile = C.getProfile("emerald-us");
-  C.setData(C.VANILLA);
-  const mk = (sp: number, lvl: number, o: Partial<C.Pokemon> = {}) =>
-    makeMon(sp, lvl, { nickname: defaultName(sp), otName: "MAY", pid: (Math.random() * 2 ** 32) >>> 0, ...o });
-  const party = [
-    mk(282, 52, { moves: [299, 280, 332, 7], pp: [10, 15, 20, 15], heldItem: 215, nickname: "BLAZE" }),
-    mk(329, 44, { moves: [57, 58, 105, 352], pp: [15, 10, 10, 20], heldItem: 200 }),
-    mk(394, 41, { moves: [94, 85, 104, 105], pp: [10, 15, 15, 10] }),
-    mk(397, 50, { moves: [337, 89, 53, 349], pp: [15, 10, 15, 20], heldItem: 186 }),
-  ];
-  const boxMons = [286, 288, 290, 25, 304, 309, 333, 371, 374, 376, 383].map((sp, i) =>
-    ({ box: 0, slot: i, mon: mk(sp, 8 + i * 3, { moves: [33, 45, 0, 0], pp: [35, 40, 0, 0] }) }));
-  boxMons.push({ box: 1, slot: 0, mon: mk(150, 70, { moves: [94, 105, 248, 54], pp: [10, 10, 10, 30] }) });
-  boxMons.push({ box: 1, slot: 7, mon: mk(380, 30, { moves: [163, 0, 0, 0], pp: [20, 0, 0, 0] }) });
-  const shiny = mk(129, 20, { moves: [150, 33, 175, 0], pp: [40, 35, 15, 0] });
-  shiny.pid = C.rerollPid(shiny, { shiny: true }) ?? shiny.pid;
-  boxMons.push({ box: 0, slot: 14, mon: shiny });
-  return buildSave({ profile, name: "MAY", money: 48210, key: 0x3c91a7e5, party, boxMons, rotate: 3, counterA: 211, counterB: 210 });
-}
 
 // ---------- Export ----------
 
@@ -346,18 +367,20 @@ function renderTop() {
 
   mount($("topActions"),
     h("div", { class: "actgroup open" },
-      fileButton("Open save", "btn primary", "save"),
+      s ? fileButton("Open save", "btn primary", "save") : null,
       s ? h("button", { class: `btn icon-more ${st.fileMenu ? "on" : ""}`, "aria-expanded": st.fileMenu ? "true" : "false", "aria-controls": "fileMeta",
         onclick: () => { st.fileMenu = !st.fileMenu; renderAll(); } }, st.fileMenu ? "Done" : "File") : null),
     h("div", { id: "fileMeta", class: `actgroup meta ${st.fileMenu ? "show" : ""}` },
       s ? field("Game / engine", "gameSel", select("gameSel", s.profile.id, C.PROFILES.map(p => [p.id, p.name]), v => reparse(v))) : null,
       s ? h("div", { class: "field" }, h("span", { class: "fieldlabel" }, "Save slot"), slotChip) : null,
+      st.rom ? h("div", { class: "romchip" }, h("span", {}, "ROM: ", h("strong", {}, romLabel()), ` (${st.rom.header.code})`),
+        h("button", { class: "linkish", onclick: forgetRom }, "Forget")) : null,
       h("div", { class: "row tight phone-only-flex" },
-        fileButton(st.rom ? "ROM loaded ✓" : "Load ROM (sprites)", "btn", "rom", { title: "Optional: read species, move and item names from your ROM" }),
+        fileButton(st.rom ? "Change ROM" : "Load ROM", "btn", "rom", { title: "The ROM the save belongs to: names, stats and sprites come from it" }),
         s ? h("button", { class: "btn", onclick: exportBackup }, "Download original") : null)),
     h("div", { class: "actgroup export" },
       h("span", { class: "desktop-only" },
-        fileButton(st.rom ? "ROM loaded ✓" : "Load ROM", "btn", "rom", { title: "Optional: read species, move and item names from your ROM" }),
+        s ? fileButton(st.rom ? "Change ROM" : "Load ROM", "btn", "rom", { title: "The ROM the save belongs to: names, stats and sprites come from it" }) : null,
         s ? h("button", { class: "btn", onclick: exportBackup }, "Download original") : null),
       st.busy ? h("span", { class: "pill warn" }, st.busy) : null,
       s && st.dirty ? h("span", { class: "pill warn", title: "Edits are not saved to a file yet" }, "Unsaved changes") : null,
@@ -399,6 +422,7 @@ function slotCount(b: C.Box) { return b.slots.filter(Boolean).length; }
 /** Phone navigation: three segments instead of the side rail. */
 function renderTabs() {
   const s = st.save, el = $("tabs");
+  el.hidden = !s;
   if (!s) { mount(el); return; }
   const tab = (v: View, label: string, meta: string) =>
     h("button", { class: `tab ${st.view === v ? "on" : ""}`, role: "tab", "aria-selected": st.view === v ? "true" : "false",
@@ -574,7 +598,7 @@ function swap(from: NonNullable<Sel>, to: NonNullable<Sel>) {
 
 function renderMain() {
   const s = st.save, main = $("main");
-  if (!s) { mount(main, h("div", { class: "emptystate" }, h("h2", {}, "Open a Gen III save"), h("p", {}, "Choose a 128 KB .sav file from Ruby, Sapphire, Emerald, FireRed, LeafGreen, or a pokeemerald-expansion or CFRU hack."))); return; }
+  if (!s) { mount(main, onboarding()); return; }
   if (st.view === "trainer") return mount(main, trainerView(s));
   if (st.view === "party") {
     const tiles = [];
@@ -611,6 +635,34 @@ function renderMain() {
         field("Wallpaper", "wallSel", select("wallSel", b.wallpaper, WALLPAPERS.map((w, i) => [i, w] as [number, string]).concat(b.wallpaper >= 16 ? [[b.wallpaper, `Wallpaper ${b.wallpaper}`]] : []),
           v => { b.wallpaper = Number(v); touch(); })))),
     h("div", { class: "phone-only" }, warningsPanel(s, null)));
+}
+
+function onboarding() {
+  if (st.booting) return h("div", { class: "emptystate" }, h("p", { class: "muted" }, "Loading…"));
+  const r = st.rom;
+  return h("div", { class: "onboard" },
+    h("h2", {}, "Edit a Gen III save in two steps"),
+    h("p", { class: "muted" }, "Works with Ruby, Sapphire, Emerald, FireRed, LeafGreen and ROM hacks built on them, pokeemerald-expansion or CFRU. Files stay on this device."),
+    h("ol", { class: "steps" },
+      h("li", { class: `step ${r ? "done" : "now"}` },
+        h("div", { class: "stepnum", "aria-hidden": "true" }, r ? "✓" : "1"),
+        h("div", { class: "stepbody" },
+          h("h3", {}, r ? "ROM loaded" : "Load your game's ROM"),
+          r ? h("p", {}, h("strong", {}, romLabel()), ` · ${r.header.code} · ${r.data.species.length - 1} species · ${r.sprites ? "sprites found" : "no sprites"}`)
+            : h("p", {}, "The .gba file you play. The editor reads the hack's own Pokémon names, moves, items, stats and sprites from it. It's only read, never changed or uploaded."),
+          h("div", { class: "row" },
+            fileButton(r ? "Use a different ROM" : "Choose ROM (.gba)", r ? "btn" : "btn primary", "rom"),
+            r ? h("button", { class: "btn", onclick: forgetRom }, "Forget ROM") : null),
+          h("label", { class: "check small" },
+            h("input", { type: "checkbox", id: "remember", checked: st.rememberRom, onchange: (e: Event) => { st.rememberRom = (e.target as HTMLInputElement).checked; if (!st.rememberRom) idbPut("rom", null); } }),
+            h("span", {}, "Remember the ROM on this device")))),
+      h("li", { class: `step ${r ? "now" : "later"}` },
+        h("div", { class: "stepnum", "aria-hidden": "true" }, "2"),
+        h("div", { class: "stepbody" },
+          h("h3", {}, "Open your save"),
+          h("p", {}, "The 128 KB .sav file from your emulator. Close the game first so the file is up to date."),
+          r ? fileButton("Choose save (.sav)", "btn primary", "save") : h("button", { class: "btn", disabled: true }, "Choose save (.sav)")))),
+  );
 }
 
 function trainerView(s: C.ParsedSave) {
@@ -896,7 +948,13 @@ function boot() {
   document.addEventListener("keydown", e => { if (e.key === "Escape" && (st.sheet || st.moving)) { st.moving = null; closeSheet(); } });
   matchMedia("(max-width: 900px)").addEventListener?.("change", () => renderAll());
   window.addEventListener("beforeunload", e => { if (st.dirty && !st.isDemo) { e.preventDefault(); e.returnValue = ""; } });
-  loadBytes(demoSave(), "example-emerald.sav", true);
+  // Reopen the remembered ROM, if any; otherwise show the two-step start screen.
+  idbGet<{ name: string; bytes: Uint8Array }>("rom").then(async saved => {
+    if (saved?.bytes) await loadRom(new Uint8Array(saved.bytes), saved.name, true);
+    st.booting = false;
+    renderAll();
+  });
+  renderAll();
 }
 
 boot();
