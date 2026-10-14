@@ -5,6 +5,7 @@
 import { u32 } from "./binary";
 import { encodeBytes, decodeStrict } from "./text";
 import { GameData, SpeciesInfo, titleCase, TYPE_NAMES } from "./data";
+import { findLearnsets } from "./learnsets";
 
 export interface RomHeader { title: string; code: string; maker: string; size: number; isGba: boolean }
 
@@ -238,6 +239,18 @@ export interface RomLoadResult {
 }
 
 export function loadRomData(rom: Uint8Array): RomLoadResult {
+  const res = loadTables(rom);
+  try {
+    const d = res.data;
+    // expansion keeps learnset pointers in its species records; vanilla layouts use separate tables
+    const rec = res.gf && res.gf.speciesNames !== null ? null : res.record;
+    d.learn = findLearnsets(rom, d.species.length, d.moves.length, res.header.code, rec);
+    res.report.push(...d.learn.report);
+  } catch { res.report.push("learnsets not found"); }
+  return res;
+}
+
+function loadTables(rom: Uint8Array): RomLoadResult {
   const header = readRomHeader(rom);
   const report: string[] = [];
   if (!header.isGba) throw new Error("This file isn't a GBA ROM (its header check byte is missing).");

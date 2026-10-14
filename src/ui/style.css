@@ -424,3 +424,33 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
 .repairapply { position: sticky; bottom: 0; padding: 10px 0; background: var(--bg); align-items: center; gap: 12px; flex-wrap: wrap; }
 .small { font-size: 0.82rem; }
 @media (max-width: 900px) { .repairapply { bottom: 72px; } }
+
+/* Base stats */
+.basestats { display: flex; flex-direction: column; gap: 5px; padding: 12px; background: var(--sunk); border-radius: var(--r); }
+.bshead { display: flex; justify-content: space-between; gap: 8px; font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin-bottom: 2px; }
+.bshead .muted { text-transform: none; letter-spacing: 0; font-weight: 500; }
+.bsrow { display: grid; grid-template-columns: 44px 34px minmax(0, 1fr); gap: 8px; align-items: center; font-variant-numeric: tabular-nums; }
+.bsrow.total { border-top: 1px solid var(--line); padding-top: 5px; margin-top: 2px; }
+.bsval { text-align: right; font-weight: 700; font-size: 0.88rem; }
+.bsbar { height: 8px; border-radius: 4px; background: var(--surface); overflow: hidden; }
+.bsfill { display: block; height: 100%; border-radius: 4px; }
+.bsfill.vlo { background: #d9534f; } .bsfill.lo { background: #e6a23c; } .bsfill.mid { background: #8bc34a; } .bsfill.hi { background: #26a69a; }
+.basestats .facts { margin-top: 8px; }
+
+/* Learnable moves */
+.learn { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; border-top: 1px solid var(--line); padding-top: 12px; }
+.learn h4 { margin: 0; font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.teachto { display: flex; flex-direction: column; gap: 4px; }
+.seg { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; }
+.segbtn { font: inherit; font-size: 0.8rem; padding: 8px 8px; min-height: 40px; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); color: inherit; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.segbtn.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); font-weight: 700; }
+.learngroup { border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); }
+.learngroup summary { padding: 10px 12px; font-weight: 700; font-size: 0.88rem; cursor: pointer; min-height: 44px; box-sizing: border-box; display: flex; align-items: center; }
+.learngroup ul { list-style: none; margin: 0; padding: 0 6px 6px; display: flex; flex-direction: column; }
+.learngroup .note { padding: 0 12px 10px; }
+.learnrow { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: var(--r); min-height: 40px; }
+.learnrow:nth-child(odd) { background: var(--sunk); }
+.learnrow.later .lrname, .learnrow.later .lrtag { opacity: 0.6; }
+.lrtag { font-size: 0.76rem; color: var(--muted); }
+.lrname { font-size: 0.88rem; min-width: 0; overflow-wrap: anywhere; }
+.known { font-size: 0.76rem; color: var(--ok); font-weight: 700; padding: 0 8px; }

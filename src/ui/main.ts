@@ -22,6 +22,7 @@ const st = {
   sheet: false,                      // phone: editor sheet open
   moving: null as Sel,               // tap-to-move source
   edTab: "info" as "info" | "moves" | "stats" | "ot",
+  teachSlot: null as number | null,  // move slot that "Teach" writes to; null = first empty, else the last
   fileMenu: false,                   // phone: file options expanded
   rememberRom: true,
   booting: true,
@@ -549,7 +550,7 @@ function slotTile(m: C.Pokemon | null, sel: NonNullable<Sel>, label: string) {
     "data-type": type, draggable: m ? "true" : undefined,
     onclick: () => {
       if (st.moving) { const from = st.moving; st.moving = null; swap(from, sel); return; }
-      st.sel = sel; st.armDelete = false;
+      st.sel = sel; st.armDelete = false; st.teachSlot = null;
       if (isPhone() && (m || st.clip)) openSheet();
       renderAll();
     },
@@ -876,9 +877,11 @@ function editor(m: C.Pokemon) {
       })),
       ci.storesPP
         ? h("button", { class: "btn small", onclick: () => editMon(x => { x.pp = x.moves.map((mv, i) => C.maxPP(mv, x.ppBonuses, i)); }) }, "Restore all PP")
-        : h("p", { class: "note" }, "CFRU doesn't store PP for Pokémon in the PC; it's restored when you withdraw them.")),
+        : h("p", { class: "note" }, "CFRU doesn't store PP for Pokémon in the PC; it's restored when you withdraw them."),
+      learnable(m, lvl, ci.maxMove)),
 
     st.edTab !== "stats" ? null : section("Stats",
+      baseStats(m.species),
       h("div", { class: "stats" },
         h("div", { class: "statrow head" }, h("span", {}), h("span", {}, "IV"), h("span", {}, "EV"), h("span", {}, "Stat")),
         STAT_LABELS.map((lab, i) => h("div", { class: "statrow" },
@@ -911,6 +914,74 @@ function editor(m: C.Pokemon) {
         h("dt", {}, "Format"), h("dd", {}, ci.label),
         m.party ? [h("dt", {}, "HP"), h("dd", {}, `${m.party.hp} / ${m.party.stats[0]}`)] : null)),
   );
+}
+
+const GROWTH = ["Medium Fast", "Erratic", "Fluctuating", "Medium Slow", "Fast", "Slow"];
+function genderRatio(g: number) {
+  if (g === 255) return "Genderless";
+  if (g === 0) return "Always male";
+  if (g >= 254) return "Always female";
+  const f = (Math.round((g / 256) * 8) / 8) * 100; // the standard ratios: 12.5%, 25%, 50%, 75%, 87.5%
+  return `${100 - f}% male · ${f}% female`;
+}
+
+/** The species' base stats with bars, as the game's tables define them. */
+function baseStats(species: number) {
+  const info = C.data().info[species];
+  if (!info) return h("p", { class: "note" }, "Base stats for this species aren't known. Load the game's ROM to see them.");
+  const total = info.bs.reduce((a, b) => a + b, 0);
+  const abil = [...new Set(info.ab.filter(Boolean))];
+  return h("div", { class: "basestats" },
+    h("div", { class: "bshead" }, h("span", {}, "Base stats"), h("span", { class: "muted" }, `${C.speciesName(species)}`)),
+    STAT_LABELS.map((lab, i) => {
+      const v = info.bs[i];
+      return h("div", { class: "bsrow" },
+        h("span", { class: "statlab" }, lab),
+        h("span", { class: "bsval" }, String(v)),
+        h("span", { class: "bsbar", "aria-hidden": "true" },
+          h("span", { class: `bsfill ${v >= 120 ? "hi" : v >= 80 ? "mid" : v >= 50 ? "lo" : "vlo"}`, style: `width:${Math.min(100, (v / 180) * 100)}%` })));
+    }),
+    h("div", { class: "bsrow total" }, h("span", { class: "statlab" }, "Total"), h("span", { class: "bsval" }, String(total)), h("span", {})),
+    h("dl", { class: "facts" },
+      h("dt", {}, "Type"), h("dd", {}, info.t.join(" / ")),
+      h("dt", {}, "Abilities"), h("dd", {}, abil.map((a, i) => `${C.abilityName(a)}${a === info.ab[2] && a !== info.ab[0] && a !== info.ab[1] ? " (hidden)" : ""}${i < abil.length - 1 ? ", " : ""}`).join("") || "—"),
+      h("dt", {}, "Growth"), h("dd", {}, info.gr === null ? "Unknown" : GROWTH[info.gr] ?? "Unknown"),
+      h("dt", {}, "Gender"), h("dd", {}, genderRatio(info.g))));
+}
+
+/** Moves this species learns, with a button to teach each one. */
+function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
+  const d = C.data(), L = d.learn;
+  if (!L) return h("div", { class: "learn" }, h("h4", {}, "Moves it can learn"),
+    h("p", { class: "note" }, "Load the game's ROM to see which moves this Pokémon learns."));
+  const lv = L.levelUp[m.species] ?? null, teach = L.teach[m.species] ?? null, egg = L.egg[m.species] ?? null;
+  const firstEmpty = m.moves.findIndex(x => x === 0);
+  const slot = st.teachSlot ?? (firstEmpty >= 0 ? firstEmpty : 3);
+  const known = new Set(m.moves.filter(Boolean));
+  const teachBtn = (mv: number) => known.has(mv)
+    ? h("span", { class: "known" }, "Known")
+    : h("button", { class: "btn small", disabled: mv > maxMove, "aria-label": `Teach ${C.moveName(mv)} in slot ${slot + 1}`, onclick: () => {
+        editMon(x => { x.moves[slot] = mv; x.pp[slot] = C.maxPP(mv, x.ppBonuses, slot); });
+        st.teachSlot = null;
+        toast(`${m.nickname || C.speciesName(m.species)} learned ${C.moveName(mv)}.`, "good");
+      } }, "Teach");
+  const row = (tag: string, mv: number, later = false) =>
+    h("li", { class: `learnrow ${later ? "later" : ""}` }, h("span", { class: "lrtag mono" }, tag), h("span", { class: "lrname" }, C.moveName(mv)), teachBtn(mv));
+  const group = (title: string, items: Node[], open: boolean, empty: string) =>
+    h("details", { class: "learngroup", open },
+      h("summary", {}, `${title} · ${items.length}`),
+      items.length ? h("ul", {}, items) : h("p", { class: "note" }, empty));
+  const sortedTeach = teach ? [...teach].sort((a, b) => (L.tmLabel.get(a) ?? "~" + C.moveName(a)).localeCompare(L.tmLabel.get(b) ?? "~" + C.moveName(b))) : null;
+  return h("div", { class: "learn" },
+    h("h4", {}, "Moves it can learn"),
+    h("div", { class: "teachto" }, h("span", { class: "muted small" }, "Teach into"),
+      h("div", { class: "seg" }, [0, 1, 2, 3].map(i => h("button", { class: `segbtn ${slot === i ? "on" : ""}`, "aria-pressed": slot === i ? "true" : "false",
+        onclick: () => { st.teachSlot = i; renderAll(); } }, `${i + 1} · ${m.moves[i] ? C.moveName(m.moves[i]) : "empty"}`)))),
+    lv === null ? h("p", { class: "note" }, "Level-up moves weren't found in this ROM.")
+      : group("By level", lv.map(([l, mv]) => row(l === 0 ? "Evo" : `Lv ${l}`, mv, lvl !== null && l > lvl)), true, "Learns no moves by level."),
+    sortedTeach === null ? h("p", { class: "note" }, `${L.teachTitle} compatibility wasn't found in this ROM.`)
+      : group(L.teachTitle, sortedTeach.map(mv => row(L.tmLabel.get(mv) ?? "Tutor", mv)), false, `Can't learn any ${L.teachTitle} moves.`),
+    egg === null ? null : group("Egg moves", egg.map(mv => row("Egg", mv)), false, "Has no egg moves."));
 }
 
 function section(_title: string, ...body: Node[]) {

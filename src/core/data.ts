@@ -1,6 +1,7 @@
 // Game data. The built-in tables come from the pret/pokeemerald decompilation (see README);
 // ROM hacks can supply their own through rom.ts. Core code reads the active set via data().
 import raw from "./gamedata.json";
+import type { Learnsets } from "./learnsets";
 
 export interface SpeciesInfo {
   t: string[];            // type names
@@ -23,6 +24,8 @@ export interface GameData {
   abilities: string[];
   shedinja: number;               // species index of Shedinja (HP is always 1), -1 if unknown
   notes: string[];                // what is missing or approximate in this data set
+  /** Which moves each species learns; only read from a ROM. */
+  learn?: Learnsets;
 }
 
 export const CHARMAP: Record<string, string> = raw.charmap;

@@ -311,7 +311,7 @@ describe("ROM reader", () => {
       expect(d.info[1]!.ab).toEqual([65, 0, 34]);
       expect(d.info[1]!.t).toEqual(["Grass", "Poison"]); expect(d.info[4]!.t).toEqual(["Fire"]);
       expect(d.info[197]!.t).toEqual(["Dark"]);
-      expect(report.some(r => /not found/.test(r))).toBe(false);
+      expect(report.some(r => /not found/.test(r) && !/moves|TM|learnsets/.test(r))).toBe(false);
       setData(d);
       const m = makeMon(1, 12, { abilityNum: 2 });
       expect(abilityId(m)).toBe(34);
@@ -458,5 +458,56 @@ describe("repair", () => {
     expect(issues[0].recommended).toBe(false);
     applyIssues(r, issues);
     expect(r.party).toHaveLength(1);
+  });
+});
+
+import { findLearnsets } from "../src/core";
+
+describe("learnsets", () => {
+  const N = 40, MOVES = 300;
+  const rom = () => { const r = new Uint8Array(0x40000); r.fill(0xff, 0x100, 0x200); return r; };
+  const P = (o: number) => 0x08000000 + o;
+  it("reads vanilla level-up, TM/HM and egg tables, preferring the copy the code points to", () => {
+    const r = rom();
+    let free = 0x10000;
+    const put = (bytes: number[]) => { const at = free; r.set(bytes, at); free += (bytes.length + 3) & ~3; return at; };
+    const u16s = (vals: number[]) => vals.flatMap(v => [v & 0xff, v >> 8]);
+    const lists: number[] = [];
+    for (let s = 0; s < N; s++) lists.push(put(u16s([(1 << 9) | 33, (5 << 9) | ((s % 200) + 1), (9 << 9) | 45, 0xffff])));
+    const writeTable = (shift: number) => { const t = free; for (let s = 0; s < N; s++) w32(r, t + s * 4, P(lists[(s + shift) % N])); free += N * 4; return t; };
+    writeTable(1); // stale copy left behind by a repoint
+    const live = writeTable(0);
+    const tmMoves = put(u16s([...Array.from({ length: 50 }, (_, i) => 100 + i), 15, 19, 57, 70, 148, 249, 127, 291]));
+    const bits = free; free += N * 8;
+    for (let s = 1; s < N; s++) { w32(r, bits + s * 8, (s * 2654435761) >>> 6); w32(r, bits + s * 8 + 4, (s * 7) & 0x3ffffff); }
+    const egg = put(u16s([20001, 10, 11, 20003, 12, 20004, 13, 20005, 14, 20006, 15, 0xffff]));
+    // "code" referencing the live tables
+    [live, tmMoves, bits, egg].forEach((t, i) => w32(r, 0x8000 + i * 4, P(t)));
+    const L = findLearnsets(r, N, MOVES, "BPEE", null);
+    expect(L.levelUp[7]).toEqual([[1, 33], [5, 8], [9, 45]]);
+    expect(L.teach[1]!.length).toBeGreaterThan(3);
+    expect(L.tmLabel.get(100)).toBe("TM01");
+    expect(L.tmLabel.get(15)).toBe("HM01");
+    expect(L.egg[1]).toEqual([10, 11]);
+    expect(L.egg[3]).toEqual([12]);
+    expect(L.egg[2]).toEqual([]);
+  });
+  it("reads expansion pointers from species records", () => {
+    const r = rom();
+    const stride = 64, at = 0x20000;
+    let free = 0x30000;
+    const put = (bytes: number[]) => { const a = free; r.set(bytes, a); free += (bytes.length + 3) & ~3; return a; };
+    const u16s = (vals: number[]) => vals.flatMap(v => [v & 0xff, v >> 8]);
+    for (let s = 1; s < N; s++) {
+      const o = at + (s - 1) * stride;
+      w32(r, o + 40, P(put(u16s([33, 1, 200 + (s % 50), 7, 0xffff, 0]))));
+      w32(r, o + 44, P(put(u16s([60, 61, 62, 0xffff]))));
+      w32(r, o + 48, P(put(u16s(s % 2 ? [70, 0xffff] : [0xffff]))));
+    }
+    const L = findLearnsets(r, N, MOVES, "BPEE", { at, stride });
+    expect(L.levelUp[3]).toEqual([[1, 33], [7, 203]]);
+    expect(L.teach[3]).toEqual([60, 61, 62]);
+    expect(L.egg[3]).toEqual([70]);
+    expect(L.egg[4]).toEqual([]);
   });
 });
