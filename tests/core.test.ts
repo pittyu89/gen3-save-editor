@@ -532,3 +532,21 @@ describe("adding Pokémon", () => {
     expect(r.party[1].party!.level).toBe(12);
   });
 });
+
+describe("hacks without Pokémon encryption", () => {
+  it("reads and writes back records stored plain", () => {
+    const bytes = buildSave({ profile: E, party: [makeMon(25, 10)], boxMons: [{ box: 0, slot: 0, mon: makeMon(4, 20) }] });
+    const s = parse(bytes, E);
+    // rewrite the box record with encryption off (shuffle kept)
+    const m = s.boxes[0].slots[0]!; m.cipher = "plain"; m.dirty = true;
+    const r = parse(write(s), E);
+    expect(r.boxes[0].slots[0]!.checksumOk).toBe(true);
+    expect(r.boxes[0].slots[0]!.cipher).toBe("plain");
+    expect(r.boxes[0].slots[0]!.species).toBe(4);
+    r.boxes[0].slots[0]!.nickname = "CHAR"; r.boxes[0].slots[0]!.dirty = true;
+    const r2 = parse(write(r), E);
+    expect(r2.boxes[0].slots[0]!.nickname).toBe("CHAR");
+    expect(r2.boxes[0].slots[0]!.cipher).toBe("plain");
+    expect(r2.party[0].cipher).toBe("vanilla");
+  });
+});

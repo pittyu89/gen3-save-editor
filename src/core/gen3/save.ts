@@ -388,3 +388,12 @@ export function verify(bytes: Uint8Array, slotIndex: 0 | 1, profile?: GameProfil
 }
 
 export { getProfile };
+
+/** The record scrambling most Pokémon in this save use, so new ones match what the game expects. */
+export function saveCipher(save: ParsedSave): Pokemon["cipher"] {
+  const n = new Map<string, number>();
+  for (const m of [...save.party, ...save.boxes.flatMap(b => b.slots)]) if (m && m.checksumOk) n.set(m.cipher ?? "vanilla", (n.get(m.cipher ?? "vanilla") ?? 0) + 1);
+  let best: string = "vanilla", c = 0;
+  for (const [k, v] of n) if (v > c) { best = k; c = v; }
+  return best as Pokemon["cipher"];
+}

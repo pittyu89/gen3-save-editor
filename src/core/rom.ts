@@ -86,6 +86,9 @@ function readNames(rom: Uint8Array, t: Table, cap: number): string[] {
       continue;
     }
     misses = 0;
+    // every real name starts with a capital, digit or symbol; a lowercase start means we've slid
+    // into another table at a different alignment
+    if (i > 10 && /^[a-z]/.test(s.trim())) break;
     out.push(titleCase(s.trim()));
   }
   while (out.length > 1 && out[out.length - 1] === "") out.pop();
@@ -219,6 +222,44 @@ function findMoveDescriptions(rom: Uint8Array, moveCount: number): string[] | nu
   const out = [""];
   for (let i = 0; i < Math.min(best.len, moveCount - 1 + 50); i++) out.push(textAt(best.at + i * 4) ?? "");
   return out;
+}
+
+/** Any battle-move table: records of some stride with PP and power bytes for moves 1-10 that mostly
+ *  match the originals (hacks rebalance a few). Returns the address of move 0's record and field offsets. */
+const POWER10 = [40, 50, 15, 18, 80, 40, 75, 75, 75, 40];
+function findMoveRecords(rom: Uint8Array): { at: number; stride: number; pp: number; power: number } | null {
+  const near = (a: number, s: number, want: number[]) => { let n = 0; for (let i = 0; i < 10; i++) if (rom[a + i * s] === want[i]) n++; return n; };
+  for (let a = 8; a + 10 * 64 < rom.length; a++) {
+    if (rom[a] !== 35) continue;
+    for (let s = 8; s <= 64; s++) {
+      if (rom[a + s] !== 25) continue;                           // Pound 35 PP, Karate Chop 25
+      if (near(a, s, PP10) < 7) continue;
+      // power: another byte of the same records
+      for (let k = -Math.min(s - 1, a % s + s); k < s; k++) {
+        if (k === 0) continue;
+        if (near(a + k, s, POWER10) >= 7) {
+          const rec0 = a - s;                                    // PP byte of move 0
+          return { at: rec0, stride: s, pp: 0, power: k };
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/** Learns a byte offset in move records that holds the physical/special/status split, from moves whose
+ *  category never changed. Returns per-move categories, or null when the records have no such field. */
+function learnCategories(count: number, size: number, byteAt: (mv: number, k: number) => number): ("Physical" | "Special" | "Status")[] | null {
+  const PHYS = [1, 10, 33, 2, 7], SPEC = [52, 55, 94, 85, 58], STAT = [45, 39, 14, 43, 28];
+  for (let k = 0; k < size; k++) {
+    const vals = (l: number[]) => new Set(l.filter(m => m < count).map(m => byteAt(m, k)));
+    const p = vals(PHYS), sp = vals(SPEC), st = vals(STAT);
+    if (p.size !== 1 || sp.size !== 1 || st.size !== 1) continue;
+    const [vp] = p, [vs] = sp, [vt] = st;
+    if (vp === vs || vp === vt || vs === vt || vp > 3 || vs > 3 || vt > 3) continue;
+    return Array.from({ length: count }, (_, i) => { const v = byteAt(i, k); return v === vp ? "Physical" : v === vs ? "Special" : "Status"; });
+  }
+  return null;
 }
 
 // ---- Species base stats ----
@@ -374,6 +415,23 @@ export interface RomLoadResult {
   gf: GfHeader | null;
 }
 
+/** Whether the header's species table uses vanilla 28-byte base stats. Older pokeemerald-expansion
+ *  releases fill in the same header pointers but with their own, larger records. */
+function vanillaSpeciesLayout(rom: Uint8Array, gf: GfHeader): boolean {
+  if (gf.speciesInfo === null) return false;
+  let ok = 0, n = 0;
+  for (let s = 1; s <= 150; s++) {
+    const o = gf.speciesInfo + s * 28;
+    if (o + 28 > rom.length) break;
+    n++;
+    const stats = rom.subarray(o, o + 6);
+    const good = [...stats].every(v => v > 0) && rom[o + 6] < 32 && rom[o + 7] < 32 && rom[o + 19] <= 5
+      && [0, 31, 63, 127, 191, 225, 254, 255].includes(rom[o + 16]);
+    if (good) ok++;
+  }
+  return n > 0 && ok >= n * 0.9;
+}
+
 export function loadRomData(rom: Uint8Array): RomLoadResult {
   const res = loadTables(rom);
   try {
@@ -392,7 +450,7 @@ function loadTables(rom: Uint8Array): RomLoadResult {
   if (!header.isGba) throw new Error("This file isn't a GBA ROM (its header check byte is missing).");
   const gf = readGfHeader(rom);
   // Vanilla-layout ROMs keep species names in their own table; expansion leaves that pointer empty.
-  const viaHeader = gf && gf.speciesNames !== null ? loadFromGfHeader(rom, gf, report) : null;
+  const viaHeader = gf && gf.speciesNames !== null && vanillaSpeciesLayout(rom, gf) ? loadFromGfHeader(rom, gf, report) : null;
   if (viaHeader) {
     const { sp, moves, movePP, moveTypes, details, moveDesc, items, abilities, info, bs } = viaHeader;
     const shedinja = sp.findIndex(n => norm(n) === "SHEDINJA");
@@ -414,10 +472,14 @@ function loadTables(rom: Uint8Array): RomLoadResult {
 function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit<RomLoadResult, "gf"> {
   const spTable = findNameTable(rom, ["Bulbasaur", "Ivysaur", "Venusaur"], 13);
   if (!spTable) throw new Error("Couldn't find this ROM's Pokémon tables. It may be a hack whose engine this editor doesn't know yet.");
-  const sp = readNames(rom, spTable, 2047);
+  const mvTable = findNameTable(rom, ["Pound", "Karate Chop", "Double Slap"], 17);
+  // inline name tables often sit back to back; species names end where the move names begin
+  let spCap = 2047;
+  if (mvTable && spTable.kind === "inline" && mvTable.kind === "inline" && mvTable.at > spTable.at)
+    spCap = Math.min(spCap, Math.floor((mvTable.at - mvTable.stride - spTable.at) / spTable.stride));
+  const sp = readNames(rom, spTable, spCap);
   report.push(`${sp.length - 1} species names`);
 
-  const mvTable = findNameTable(rom, ["Pound", "Karate Chop", "Double Slap"], 17);
   const moves = mvTable ? readNames(rom, mvTable, 2047) : [""];
   report.push(mvTable ? `${moves.length - 1} moves` : "move names not found");
   const pp = findPP(rom, mvTable && mvTable.kind === "pointer" ? mvTable : null, moves.length);
@@ -434,9 +496,38 @@ function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit
     const bm = findBattleMoves(rom);
     if (bm) moveTypes = learnMoveTypes(moves.length, 12, (mv, k) => rom[bm.at + mv * 12 + k] ?? 0, () => "Mystery");
   }
-  if (!pp) report.push("move PP not found");
+  // older expansion: a separate battle-move table with its own record size
+  let ppAll = pp, movePower: number[] | undefined, moveAcc: number[] | undefined, moveCat: ("Physical" | "Special" | "Status")[] | undefined;
+  const mr = findMoveRecords(rom);
+  if (mr) {
+    const byteAt = (mv: number, k: number) => rom[mr.at + mv * mr.stride + k] ?? 0;
+    ppAll ??= moves.map((_, i) => byteAt(i, 0));
+    movePower = moves.map((_, i) => byteAt(i, mr.power));
+    const ACC10 = [100, 100, 85, 85, 85, 100, 100, 100, 100, 100];
+    for (let k = -mr.stride + 1; k < mr.stride && !moveAcc; k++) {
+      if (k === 0 || k === mr.power) continue;
+      let n = 0; for (let i = 0; i < 10; i++) if (byteAt(i + 1, k) === ACC10[i]) n++;
+      if (n >= 8) moveAcc = moves.map((_, i) => byteAt(i, k));
+    }
+    const lo = -Math.min(mr.stride - 1, mr.at % mr.stride + mr.stride);
+    if (!moveTypes) for (let base = lo; base < 0 && !moveTypes; base++) {
+      // the type sits near the power; try the record window that starts at `base`
+      moveTypes = learnMoveTypes(moves.length, mr.stride, (mv, k) => byteAt(mv, base + k), () => "Mystery");
+    }
+    for (let base = lo; base < 0 && !moveCat; base++) {
+      const c = learnCategories(moves.length, mr.stride, (mv, k) => byteAt(mv, base + k));
+      if (c) moveCat = c;
+    }
+  }
+  if (!moveCat && moveTypes && movePower) {
+    const SPECIAL = new Set(["Fire", "Water", "Grass", "Electric", "Psychic", "Ice", "Dragon", "Dark"]);
+    moveCat = moves.map((_, i) => movePower![i] === 0 ? "Status" : SPECIAL.has(moveTypes![i]) ? "Special" : "Physical");
+  }
+  if (!ppAll) report.push("move PP not found");
 
-  const itTable = findNameTable(rom, ["Master Ball", "Ultra Ball", "Great Ball"], 21);
+  const itTable = findNameTable(rom, ["Master Ball", "Ultra Ball", "Great Ball"], 21)
+    ?? findNameTable(rom, ["Poké Ball", "Great Ball", "Ultra Ball"], 21)      // later item orders
+    ?? findNameTable(rom, ["Strange Ball", "Poké Ball", "Great Ball"], 21);
   const items = itTable ? readNames(rom, itTable, 1500) : [""];
   report.push(itTable ? `${items.length - 1} items` : "item names not found");
 
@@ -497,7 +588,8 @@ function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit
     label: `From ROM: ${header.title || header.code}`,
     source: "rom",
     species: sp, nat, info,
-    moves, movePP: pp ?? moves.map(() => 0), moveTypes: moveTypes ?? undefined,
+    moves, movePP: ppAll ?? moves.map(() => 0), moveTypes: moveTypes ?? undefined, movePower, moveAcc, moveCat,
+    moveDesc: findMoveDescriptions(rom, moves.length) ?? undefined,
     items, abilities, shedinja,
     notes: report.filter(r => /not found/.test(r)),
   };

@@ -54,6 +54,8 @@ export interface Pokemon {
   natureMod: number;         // expansion: XORed with PID nature to give the stat nature (mints)
   party?: PartyExtra;
   checksumOk: boolean;
+  /** How the secure area is scrambled; hacks may disable the game's encryption. */
+  cipher?: Cipher;
   /** Decrypted 48 bytes in canonical order (Growth, Attacks, EVs, Misc), kept so unmodelled bits survive. */
   secure?: Uint8Array;
   raw?: Uint8Array;
@@ -180,19 +182,30 @@ export function decodePokemon(b: Uint8Array, o: number, isParty: boolean, codec:
   return m;
 }
 
+export type Cipher = "vanilla" | "plain" | "plain-ordered" | "xor-ordered";
+const CIPHERS: Cipher[] = ["vanilla", "plain", "plain-ordered", "xor-ordered"];
+function unscramble(b: Uint8Array, o: number, pid: number, otId: number, c: Cipher): Uint8Array {
+  const key = c === "vanilla" || c === "xor-ordered" ? (pid ^ otId) >>> 0 : 0;
+  const pos = c === "vanilla" || c === "plain" ? ORDER[pid % 24] : [0, 1, 2, 3];
+  const sec = new Uint8Array(48);
+  for (let blk = 0; blk < 4; blk++) for (let i = 0; i < 12; i += 4) w32(sec, blk * 12 + i, (u32(b, o + 0x20 + pos[blk] * 12 + i) ^ key) >>> 0);
+  return sec;
+}
+
 function decodeFull(b: Uint8Array, o: number, s: FullSpec): Pokemon | null {
   if (isEmptyRecord(b, o)) return null;
-  const pid = u32(b, o), otId = u32(b, o + 4), key = (pid ^ otId) >>> 0;
-  const pos = ORDER[pid % 24];
-  const sec = new Uint8Array(48);
-  let sum = 0;
-  for (let blk = 0; blk < 4; blk++) {
-    for (let i = 0; i < 12; i += 4) {
-      const v = (u32(b, o + 0x20 + pos[blk] * 12 + i) ^ key) >>> 0;
-      w32(sec, blk * 12 + i, v);
-    }
+  const pid = u32(b, o), otId = u32(b, o + 4);
+  const stored = u16(b, o + 0x1c);
+  // The game XORs and shuffles the 48 secure bytes. Some decomp hacks turn that off; try the
+  // variants and keep the one whose checksum matches (the vanilla scheme when none does).
+  let sec = new Uint8Array(48), sum = 0, cipher: Cipher = "vanilla";
+  for (const c of CIPHERS) {
+    const t = unscramble(b, o, pid, otId, c);
+    let s2 = 0;
+    for (let i = 0; i < 48; i += 2) s2 = (s2 + u16(t, i)) & 0xffff;
+    if (c === "vanilla") { sec = t; sum = s2; }
+    if (s2 === stored) { sec = t; sum = s2; cipher = c; break; }
   }
-  for (let i = 0; i < 48; i += 2) sum = (sum + u16(sec, i)) & 0xffff;
   const hdr = b.subarray(o, o + 0x20);
   let nickname = decodeText(b, o + 8, 10);
   if (s.nick11 && nickname.length === 10) {
@@ -229,7 +242,7 @@ function decodeFull(b: Uint8Array, o: number, s: FullSpec): Pokemon | null {
     abilityNum,
     shinyMod: s.shinyMod ? getBits(hdr, s.shinyMod) : 0,
     natureMod: s.natureMod ? getBits(hdr, s.natureMod) : 0,
-    checksumOk: sum === u16(b, o + 0x1c),
+    checksumOk: sum === stored, cipher,
     secure: sec,
     raw: b.slice(o, o + BOX_SIZE),
   };
@@ -332,8 +345,9 @@ function encodeFull(mon: Pokemon, b: Uint8Array, o: number, s: FullSpec) {
   if (s.shinyMod) setBits(hdr, s.shinyMod, mon.shinyMod & 1);
   w16(hdr, 0x1c, sum);
   b.set(hdr, o);
-  const key = (mon.pid ^ mon.otId) >>> 0;
-  const pos = ORDER[mon.pid % 24];
+  const c = mon.cipher ?? "vanilla";
+  const key = c === "vanilla" || c === "xor-ordered" ? (mon.pid ^ mon.otId) >>> 0 : 0;
+  const pos = c === "vanilla" || c === "plain" ? ORDER[mon.pid % 24] : [0, 1, 2, 3];
   for (let blk = 0; blk < 4; blk++)
     for (let i = 0; i < 12; i += 4)
       w32(b, o + 0x20 + pos[blk] * 12 + i, (u32(sec, blk * 12 + i) ^ key) >>> 0);

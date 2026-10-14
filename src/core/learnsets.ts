@@ -40,7 +40,8 @@ function refs(rom: Uint8Array, t: number): number {
   for (let a = 0; a + 4 <= rom.length; a += 4) if (rom[a] === b0 && rom[a + 1] === b1 && rom[a + 2] === b2 && rom[a + 3] === b3) n++;
   return n;
 }
-function pickReferenced<T extends { at: number }>(rom: Uint8Array, cands: T[]): T | null {
+function pickReferenced<T extends { at: number }>(rom: Uint8Array, cands: T[], mustBeUsed = false): T | null {
+  if (mustBeUsed) { const used = cands.filter(c => refs(rom, c.at) > 0); return used.length ? pickReferenced(rom, used) : null; }
   if (cands.length <= 1) return cands[0] ?? null;
   let best = cands[0], bestRefs = -1;
   for (const c of cands) { const r = refs(rom, c.at); if (r > bestRefs) { best = c; bestRefs = r; } }
@@ -160,20 +161,22 @@ function findTmMoves(rom: Uint8Array, moveCount: number, anchor: number | null):
     const start = a - 100; // 50 TMs before the HMs
     if (valid(start, 58)) found.push({ at: start, tms: 50, total: 58 });
   }
-  return pickReferenced(rom, found);
+  return pickReferenced(rom, found, true); // an unreferenced list is a leftover the game no longer uses
 }
+
+const popcount = (v: number) => { let n = 0; while (v) { v &= v - 1; n++; } return n; };
 
 /** Per-species TM/HM bitfields. Entry 0 (no species) is empty (or all set) and unused bits stay clear.
  *  Returns how many species the table covers (hacks that add species may not extend it), or 0. */
-function bitTableRun(rom: Uint8Array, t: number, n: number, total: number, checkZero = true): number {
-  const stride = total > 64 ? 16 : 8, words = stride / 4;
+function bitTableRun(rom: Uint8Array, t: number, n: number, total: number, checkZero = true, stride = total > 64 ? 16 : 8): number {
+  const words = stride / 4;
   if (t < 0 || t + stride * 2 > rom.length) return 0;
   const lastWord = Math.floor((total - 1) / 32), usedBits = total - lastWord * 32;
   const full = (w: number) => (w < lastWord ? 0xffffffff : w === lastWord ? (usedBits === 32 ? 0xffffffff : (2 ** usedBits) - 1) : 0);
   const e0 = Array.from({ length: words }, (_, w) => u32(rom, t + w * 4));
   if (checkZero && !e0.every(v => v === 0) && !e0.every((v, w) => v === full(w))) return 0;
   const seen = new Set<string>();
-  let nonzero = 0, s = 1;
+  let nonzero = 0, s = 1, bits = 0;
   for (; s < n && t + (s + 1) * stride <= rom.length; s++) {
     const o = t + s * stride;
     let any = false, ok = true; const key: number[] = [];
@@ -183,25 +186,45 @@ function bitTableRun(rom: Uint8Array, t: number, n: number, total: number, check
       if ((w > lastWord && v) || (w === lastWord && usedBits < 32 && v >>> usedBits)) ok = false;
     }
     if (!ok) break;
-    if (any) { nonzero++; seen.add(key.join(",")); }
+    if (any) { nonzero++; seen.add(key.join(",")); for (const v of key) bits += popcount(v); }
   }
   const covered = s - 1;
   if (covered < Math.min(n - 1, 200)) return 0;
-  return nonzero >= covered * 0.6 && seen.size >= covered * 0.3 ? s : 0;
+  // real tables give most species a good handful of TMs; stray data that fits the bit rules doesn't
+  return nonzero >= covered * 0.6 && seen.size >= covered * 0.3 && bits / Math.max(1, nonzero) >= 8 ? s : 0;
 }
 
-function findTmTable(rom: Uint8Array, n: number, total: number, anchor: number | null): { at: number; count: number } | null {
-  if (anchor !== null) { const t = ptr(rom, anchor); if (t !== null) { const c = bitTableRun(rom, t, n, total, false); if (c) return { at: t, count: c }; } } // the code's own pointer: trust its alignment
-  const stride = total > 64 ? 16 : 8;
-  const found: { at: number; count: number }[] = [];
-  for (let a = 0; a + 3 * stride <= rom.length; a += 4) {
-    const z = !u32(rom, a) && !u32(rom, a + 4), f = u32(rom, a) === 0xffffffff;
-    if (!z && !f) continue;
-    if (!u32(rom, a + stride) && !u32(rom, a + stride + 4)) continue; // species 1 must learn something
-    const c = bitTableRun(rom, a, n, total);
-    if (c) { found.push({ at: a, count: c }); a += c * stride - 4; }
+function findTmTable(rom: Uint8Array, n: number, total: number, anchor: number | null): { at: number; count: number; stride: number } | null {
+  // Vanilla uses u32[2] per species; pokeemerald-expansion 1.x uses u32[4] even with 58 TMs/HMs.
+  const strides = total > 64 ? [16] : [8, 16];
+  if (anchor !== null) {
+    const t = ptr(rom, anchor);
+    if (t !== null) for (const st of strides) { const c = bitTableRun(rom, t, n, total, false, st); if (c) return { at: t, count: c, stride: st }; } // the code's own pointer: trust its alignment
   }
-  return pickReferenced(rom, found);
+  const lastWord = Math.floor((total - 1) / 32), usedBits = total - lastWord * 32;
+  const found: { at: number; count: number; stride: number }[] = [];
+  for (const stride of strides) {
+    const words = stride / 4;
+    // cheap test of one species entry: something set, nothing outside the used bits
+    const entryOk = (o: number) => {
+      let any = false;
+      for (let w = 0; w < words; w++) {
+        const v = u32(rom, o + w * 4);
+        if (v) any = true;
+        if ((w > lastWord && v) || (w === lastWord && usedBits < 32 && v >>> usedBits)) return false;
+      }
+      return any;
+    };
+    for (let a = 0; a + 4 * stride <= rom.length; a += 4) {
+      const z = !u32(rom, a) && !u32(rom, a + 4), f = u32(rom, a) === 0xffffffff;
+      if (!z && !f) continue;
+      if (!entryOk(a + stride) || !entryOk(a + 2 * stride) || !entryOk(a + 3 * stride)) continue;
+      const c = bitTableRun(rom, a, n, total, true, stride);
+      if (c) { found.push({ at: a, count: c, stride }); a += c * stride - 4; }
+    }
+  }
+  // bit patterns are easy to match by accident, so only accept a table the game's code points to
+  return pickReferenced(rom, found, true);
 }
 
 /** The vanilla egg move list (species markers 20000 + species). */
@@ -280,7 +303,7 @@ export function findLearnsets(rom: Uint8Array, speciesCount: number, moveCount: 
   const tm = findTmMoves(rom, moveCount, isFr ? FR_ANCHORS.tmMoves : null);
   const tmTable = tm ? findTmTable(rom, n, tm.total, isFr ? FR_ANCHORS.tmLearn : null) : null;
   if (tm && tmTable !== null) {
-    const stride = tm.total > 64 ? 16 : 8;
+    const stride = tmTable.stride;
     const moves = Array.from({ length: tm.total }, (_, i) => u16(rom, tm.at + i * 2));
     moves.forEach((m, i) => res.tmLabel.set(m, i < tm.tms ? `TM${String(i + 1).padStart(2, "0")}` : `HM${String(i - tm.tms + 1).padStart(2, "0")}`));
     for (let s = 1; s < Math.min(n, tmTable.count); s++) {

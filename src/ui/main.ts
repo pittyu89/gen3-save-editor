@@ -824,6 +824,7 @@ function addPokemon(sel: NonNullable<Sel>) {
   pickSpecies("Add a Pokémon", 0, sp => {
     const target: NonNullable<Sel> = sel.where === "party" ? { where: "party", i: Math.min(sel.i, s.party.length) } : sel;
     const m = C.createPokemon(sp, st.addLevel, s.profile, s.trainer, target.where === "party");
+    m.cipher = C.saveCipher(s);
     setAt(target, m);
     st.sel = target; st.edTab = "info"; st.teachSlot = null; st.sheet = isPhone();
     toast(`Added ${C.speciesName(sp)} at level ${st.addLevel}.`, "good");
