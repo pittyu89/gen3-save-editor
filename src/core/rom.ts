@@ -95,6 +95,75 @@ function readNames(rom: Uint8Array, t: Table, cap: number): string[] {
   return out;
 }
 
+/** Other copies of an inline name table. Expanding hacks copy a table elsewhere and grow it, and
+ *  the GF header can keep pointing at the old, shorter one; the longest copy is the live table. */
+function longestCopy(rom: Uint8Array, t: Table, names: string[], cap: number): string[] {
+  let best = names;
+  if (t.kind !== "inline" || names.length < 4 || !names[1] || !names[2] || !names[3]) return best;
+  const tries = [names[1], names[1].toUpperCase()].map(n => encodeBytes(n)).filter((x): x is Uint8Array => !!x);
+  const seen = new Set<number>();
+  for (const enc of tries) {
+    const pat = new Uint8Array([...enc, 0xff]);
+    for (const a of findAll(rom, pat, 200)) {
+      if (seen.has(a) || a === t.at) continue;
+      seen.add(a);
+      const cand: Table = { ...t, at: a };
+      const e2 = entry(rom, cand, 2), e3 = entry(rom, cand, 3);
+      if (e2 === null || e3 === null || norm(e2) !== norm(names[2]) || norm(e3) !== norm(names[3])) continue;
+      const got = readNames(rom, cand, cap);
+      if (got.length > best.length) best = got;
+    }
+  }
+  return best;
+}
+
+// Moves whose type is the same in every Gen III game and engine, one or more per type
+const MOVE_TYPES: [number, string][] = [
+  [1, "Normal"], [10, "Normal"], [33, "Normal"], [2, "Fighting"], [16, "Flying"], [40, "Poison"], [28, "Ground"],
+  [88, "Rock"], [81, "Bug"], [122, "Ghost"], [232, "Steel"], [52, "Fire"], [55, "Water"], [22, "Grass"],
+  [84, "Electric"], [94, "Psychic"], [58, "Ice"], [82, "Dragon"], [44, "Dark"], [585, "Fairy"],
+];
+
+/** Learns which byte of a move record holds its type, and what each value means, from moves whose
+ *  type never changed. `byteAt(move, k)` reads byte k of that move's record. */
+function learnMoveTypes(count: number, size: number, byteAt: (move: number, k: number) => number, fallback: (v: number) => string): string[] | null {
+  let best: { k: number; map: Map<number, string>; score: number } | null = null;
+  for (let k = 0; k < size; k++) {
+    const map = new Map<number, string>(), back = new Map<string, number>();
+    let score = 0, bad = 0;
+    for (const [mv, t] of MOVE_TYPES) {
+      if (mv >= count) continue;
+      const v = byteAt(mv, k);
+      if ((map.has(v) && map.get(v) !== t) || (back.has(t) && back.get(t) !== v)) { bad++; continue; }
+      map.set(v, t); back.set(t, v); score++;
+    }
+    if (bad <= 3 && score >= 13 && (!best || score - bad > best.score)) best = { k, map, score: score - bad };
+  }
+  if (!best) return null;
+  return Array.from({ length: count }, (_, i) => i === 0 ? "" : best!.map.get(byteAt(i, best!.k)) ?? fallback(byteAt(i, best!.k)));
+}
+
+/** Vanilla-layout battle move tables (12-byte records, PP at +4). Picks the longest copy. */
+function findBattleMoves(rom: Uint8Array): { at: number; count: number } | null {
+  let best: { at: number; count: number } | null = null;
+  for (let a = 4 + 12; a + 12 * 12 <= rom.length; a++) {
+    if (rom[a + 12] !== PP10[1] || rom[a + 24] !== PP10[2]) continue;
+    let hits = 0;
+    for (let i = 0; i < 10; i++) if (rom[a + i * 12] === PP10[i]) hits++;
+    if (hits < 8) continue; // hacks sometimes edit a move or two
+    const at = a - 4 - 12; // entry 0
+    let count = 1, misses = 0;
+    for (let i = 1; i < 2048; i++) {
+      const o = at + i * 12;
+      if (o + 12 > rom.length) break;
+      const plausible = rom[o + 4] > 0 && rom[o + 4] <= 64 && rom[o + 3] <= 101 && rom[o + 2] < 32;
+      if (plausible) { count = i + 1; misses = 0; } else if (++misses > 2) break;
+    }
+    if (!best || count > best.count) best = { at, count };
+  }
+  return best;
+}
+
 // ---- Species base stats ----
 
 const BASE: Record<number, number[]> = {
@@ -215,7 +284,15 @@ function loadFromGfHeader(rom: Uint8Array, gf: GfHeader, report: string[]) {
   const abilities = abT ? readNames(rom, abT, capFor(gf.abilityNames!, 13, 1000)) : [""];
   const itT: Table | null = gf.items !== null ? { kind: "inline", at: gf.items + 44, stride: 44, maxLen: 14 } : null;
   const items = itT ? readNames(rom, itT, capFor(gf.items!, 44, 1500)) : [""];
-  const movePP = moves.map((_, i) => (gf.moves !== null ? rom[gf.moves + i * 12 + 4] ?? 0 : 0));
+  // CFRU and binary hacks that add moves, abilities or items may leave the header on the old tables
+  let movesAll = mvT ? longestCopy(rom, mvT, moves, 2047) : moves;
+  const abilitiesAll = abT ? longestCopy(rom, abT, abilities, 1000) : abilities;
+  const itemsAll = itT ? longestCopy(rom, itT, items, 1500) : items;
+  const bm = findBattleMoves(rom) ?? (gf.moves !== null ? { at: gf.moves, count: movesAll.length } : null);
+  if (bm && bm.count > movesAll.length) movesAll = [...movesAll, ...Array(bm.count - movesAll.length).fill("")];
+  const movePP = movesAll.map((_, i) => (bm ? rom[bm.at + i * 12 + 4] ?? 0 : 0));
+  // vanilla-layout battle moves keep the type at +2, with vanilla type ids
+  const moveTypes = bm ? movesAll.map((_, i) => (i === 0 ? "" : vanillaType(rom[bm.at + i * 12 + 2] ?? 0))) : null;
   const info: (SpeciesInfo | null)[] = sp.map(() => null);
   const bs = { at: gf.speciesInfo + 28, stride: 28 };
   for (let i = 1; i < sp.length; i++) {
@@ -228,8 +305,8 @@ function loadFromGfHeader(rom: Uint8Array, gf: GfHeader, report: string[]) {
       ab: [rom[o + 22], rom[o + 23] === rom[o + 22] ? 0 : rom[o + 23], rom[o + 26] || 0],
     };
   }
-  report.push(`${sp.length - 1} species`, `${moves.length - 1} moves`, `${items.length - 1} items`, `${abilities.length - 1} abilities`, "read via the ROM's GF header");
-  return { sp, moves, movePP, items, abilities, info, bs };
+  report.push(`${sp.length - 1} species`, `${movesAll.length - 1} moves`, `${itemsAll.length - 1} items`, `${abilitiesAll.length - 1} abilities`, "read via the ROM's GF header");
+  return { sp, moves: movesAll, movePP, moveTypes, items: itemsAll, abilities: abilitiesAll, info, bs };
 }
 
 export interface RomLoadResult {
@@ -258,12 +335,12 @@ function loadTables(rom: Uint8Array): RomLoadResult {
   // Vanilla-layout ROMs keep species names in their own table; expansion leaves that pointer empty.
   const viaHeader = gf && gf.speciesNames !== null ? loadFromGfHeader(rom, gf, report) : null;
   if (viaHeader) {
-    const { sp, moves, movePP, items, abilities, info, bs } = viaHeader;
+    const { sp, moves, movePP, moveTypes, items, abilities, info, bs } = viaHeader;
     const shedinja = sp.findIndex(n => norm(n) === "SHEDINJA");
     return {
       data: {
         id: `rom-${header.code}-${header.title}`, label: `From ROM: ${header.title || header.code}`, source: "rom",
-        species: sp, nat: sp.map(() => 0), info, moves, movePP, items, abilities, shedinja: shedinja > 0 ? shedinja : 303,
+        species: sp, nat: sp.map(() => 0), info, moves, movePP, moveTypes: moveTypes ?? undefined, items, abilities, shedinja: shedinja > 0 ? shedinja : 303,
         notes: [],
       },
       header, report, record: bs, gf,
@@ -283,6 +360,19 @@ function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit
   const moves = mvTable ? readNames(rom, mvTable, 2047) : [""];
   report.push(mvTable ? `${moves.length - 1} moves` : "move names not found");
   const pp = findPP(rom, mvTable && mvTable.kind === "pointer" ? mvTable : null, moves.length);
+  let moveTypes: string[] | null = null;
+  if (mvTable && mvTable.kind === "pointer") {
+    // expansion MoveInfo: the type is a byte somewhere in the record that holds the name pointer
+    const s0 = mvTable.stride, rec = (mv: number) => mvTable.at + (mv - 1) * s0;
+    for (const base of [0, -Math.min(s0, 64)]) {
+      moveTypes = learnMoveTypes(moves.length, s0, (mv, k) => rom[rec(mv) + base + k] ?? 0, () => "Mystery");
+      if (moveTypes) break;
+    }
+  }
+  if (!moveTypes) {
+    const bm = findBattleMoves(rom);
+    if (bm) moveTypes = learnMoveTypes(moves.length, 12, (mv, k) => rom[bm.at + mv * 12 + k] ?? 0, () => "Mystery");
+  }
   if (!pp) report.push("move PP not found");
 
   const itTable = findNameTable(rom, ["Master Ball", "Ultra Ball", "Great Ball"], 21);
@@ -346,7 +436,7 @@ function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit
     label: `From ROM: ${header.title || header.code}`,
     source: "rom",
     species: sp, nat, info,
-    moves, movePP: pp ?? moves.map(() => 0),
+    moves, movePP: pp ?? moves.map(() => 0), moveTypes: moveTypes ?? undefined,
     items, abilities, shedinja,
     notes: report.filter(r => /not found/.test(r)),
   };

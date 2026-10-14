@@ -234,6 +234,8 @@ const FR_ANCHORS = { levelUp: 0x43e20, tmLearn: 0x43c68, tmMoves: 0x125a8c };
 export function findLearnsets(rom: Uint8Array, speciesCount: number, moveCount: number, code: string,
   record: { at: number; stride: number } | null): Learnsets {
   const n = speciesCount;
+  // Hacks can add moves past the name table the editor found, so accept any plausible move id
+  moveCount = Math.max(moveCount, 1024);
   const report: string[] = [];
   const isFr = /^BP[RG]/.test(code);
   const empty = () => Array.from({ length: n }, () => null);

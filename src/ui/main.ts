@@ -17,7 +17,7 @@ const st = {
   armDelete: false,
   confirmExport: null as string[] | null,
   error: "",
-  rom: null as { data: C.GameData; header: C.RomHeader; report: string[]; fileName: string; bytes: Uint8Array; sprites: C.SpriteTables | null; gf: C.GfHeader | null } | null,
+  rom: null as { data: C.GameData; header: C.RomHeader; report: string[]; fileName: string; bytes: Uint8Array; sprites: C.SpriteTables | null; gf: C.GfHeader | null; itemIcons: C.ItemIconTable | null } | null,
   busy: "",
   sheet: false,                      // phone: editor sheet open
   moving: null as Sel,               // tap-to-move source
@@ -45,7 +45,8 @@ function romFits(p: C.GameProfile) {
 }
 function dataFor(p: C.GameProfile): C.GameData { return st.rom && romFits(p) ? st.rom.data : C.fallbackDataFor(p); }
 
-const STAT_LABELS = ["HP", "Atk", "Def", "Spe", "SpA", "SpD"];
+const STAT_LABELS = ["HP", "Atk", "Def", "Spe", "SpA", "SpD"];   // the game's storage order
+const STAT_ORDER = [0, 1, 2, 4, 5, 3];                              // shown with Speed last
 const MARKS = ["●", "■", "▲", "♥"];
 const WALLPAPERS = ["Forest", "City", "Desert", "Savanna", "Crag", "Volcano", "Snow", "Cave", "Beach", "Seafloor", "River", "Sky", "Polka-dot", "PokéCenter", "Machine", "Simple"];
 
@@ -222,7 +223,8 @@ async function loadRom(buf: Uint8Array, name: string, fromStorage = false) {
   try {
     const res = C.loadRomData(buf);
     const sprites = (() => { try { return C.findSpriteTables(buf, res.data.species.length, res.record ?? undefined, res.gf ?? undefined); } catch { return null; } })();
-    st.rom = { ...res, fileName: name, bytes: buf, sprites };
+    const itemIcons = (() => { try { return C.findItemIcons(buf, res.data.items.length); } catch { return null; } })();
+    st.rom = { ...res, fileName: name, bytes: buf, sprites, itemIcons };
     spriteCache.clear();
     if (!sprites) res.report.push("sprites not found (this ROM may use a newer compression)");
     optCache = null;
@@ -504,6 +506,37 @@ function spriteURL(species: number, shiny: boolean): string | null {
   return url;
 }
 
+/** An item's bag icon from the ROM, as a data URL; null without a matching ROM. */
+function itemIconURL(item: number): string | null {
+  const r = st.rom, s = st.save;
+  if (!item || !r?.itemIcons || !s || !romFits(s.profile)) return null;
+  const key = `item-${item}`;
+  if (spriteCache.has(key)) return spriteCache.get(key)!;
+  let url: string | null = null;
+  try {
+    const spr = C.decodeItemIcon(r.bytes, r.itemIcons, item);
+    if (spr) {
+      const c = document.createElement("canvas");
+      c.width = spr.width; c.height = spr.height;
+      c.getContext("2d")!.putImageData(new ImageData(spr.rgba, spr.width, spr.height), 0, 0);
+      url = c.toDataURL("image/png");
+    }
+  } catch { url = null; }
+  spriteCache.set(key, url);
+  return url;
+}
+const itemIcon = (item: number, cls = "itemicon") => {
+  const url = itemIconURL(item);
+  return url ? h("img", { class: cls, src: url, alt: "", width: 24, height: 24 }) : null;
+};
+const ballIcon = (m: C.Pokemon, cls = "itemicon") => {
+  const it = C.ballItem(st.save!.profile.engine, m.ball);
+  return it === null ? null : itemIcon(it, cls);
+};
+/** Type of a move, when the ROM's move table gave it. */
+const moveType = (mv: number) => (mv ? C.data().moveTypes?.[mv] : undefined) || undefined;
+const moveTypeBadge = (mv: number) => { const t = moveType(mv); return t ? h("span", { class: "typebadge small", "data-type": t }, t) : null; };
+
 const svg = (body: string, cls: string, label?: string) => {
   const span = h("span", { class: cls, "aria-hidden": label ? undefined : "true", role: label ? "img" : undefined, "aria-label": label });
   span.innerHTML = body;
@@ -574,7 +607,7 @@ function slotTile(m: C.Pokemon | null, sel: NonNullable<Sel>, label: string) {
         })() : null),
       h("span", { class: "badges" },
         C.isShiny(m) ? svg(ICON.star, "badge shiny", "Shiny") : null,
-        m.heldItem ? svg(ICON.item, "badge item", `Holding ${C.itemName(m.heldItem)}`) : null),
+        m.heldItem ? (itemIcon(m.heldItem, "itemicon tile") ?? svg(ICON.item, "badge item", `Holding ${C.itemName(m.heldItem)}`)) : null),
       warn.length ? h("span", { class: "dot", "aria-hidden": "true" }) : null,
     ] : h("span", { class: "emptylabel" }, "Empty"));
 }
@@ -810,7 +843,8 @@ function editor(m: C.Pokemon) {
         h("div", { class: "edtitle" }, m.nickname || C.speciesName(m.species), C.isShiny(m) ? svg(ICON.star, "badge shiny big", "Shiny") : null),
         h("div", { class: "muted" }, `${speciesLabel(m.species)} · Lv ${lvl ?? "?"}`, " ", genderMark(m)),
         h("div", { class: "edmeta" }, typeBadges(m.species),
-          m.heldItem ? h("span", { class: "itemchip" }, svg(ICON.item, "badge item"), C.itemName(m.heldItem)) : null)),
+          h("span", { class: "itemchip", title: C.ballName(st.save!.profile.engine, m.ball) }, ballIcon(m), C.ballName(st.save!.profile.engine, m.ball)),
+          m.heldItem ? h("span", { class: "itemchip" }, itemIcon(m.heldItem) ?? svg(ICON.item, "badge item"), C.itemName(m.heldItem)) : null)),
       h("div", { class: "row tight edactions" },
         h("button", { class: "btn small", onclick: () => { st.moving = sel; st.sheet = false; renderAll(); } }, "Move"),
         h("button", { class: "btn small", onclick: () => { st.clip = C.cloneMon(m); toast(`Copied ${C.speciesName(m.species)}. Tap an empty slot to paste.`, ""); renderAll(); } }, "Copy"),
@@ -840,7 +874,10 @@ function editor(m: C.Pokemon) {
           ? num("mLevel", lvl ?? 1, 1, 100, v => editMon(x => { C.setLevel(x, v); }))
           : h("input", { id: "mLevel", value: lvl ?? "?", disabled: true }),
           C.canSetLevel(m) ? `EXP ${m.exp.toLocaleString()}` : "Growth rate unknown; load the ROM to change level"),
-        field("Held item", "mItem", itemControl),
+        field("Held item", "mItem", h("div", { class: "withicon" }, itemIcon(m.heldItem) ?? h("span", { class: "itemicon empty" }), itemControl)),
+        field("Poké Ball", "mBall", h("div", { class: "withicon" }, ballIcon(m) ?? h("span", { class: "itemicon empty" }),
+          select("mBall", m.ball, withCurrent(C.ballChoices(st.save!.profile.engine).filter(([v]) => v <= ci.maxBall), m.ball, `Ball ${m.ball}`),
+            v => editMon(x => { x.ball = Number(v); })))),
         field("Nature", "mNature", select("mNature", C.nature(m), C.NATURES.map((n, i) => [i, n] as [number, string]),
           v => ci.hasNatureMod ? editMon(x => { x.natureMod = (x.pid % 25) ^ Number(v); }) : reroll({ nature: Number(v) }))),
         field("Ability", "mAbility", abilitySlots.length > 1
@@ -866,7 +903,7 @@ function editor(m: C.Pokemon) {
     st.edTab !== "moves" ? null : section("Moves",
       h("div", { class: "moves" }, [0, 1, 2, 3].map(i => {
         const max = C.maxPP(m.moves[i], m.ppBonuses, i);
-        return h("div", { class: "moverow" },
+        return h("div", { class: "moverow", "data-type": moveType(m.moves[i]) ?? "none" },
           select(`mMove${i}`, m.moves[i], withCurrent(opts.moves, m.moves[i], C.moveName(m.moves[i])).filter(([v]) => v <= ci.maxMove), v => editMon(x => {
             x.moves[i] = Number(v); x.pp[i] = C.maxPP(x.moves[i], x.ppBonuses, i);
           }), { "aria-label": `Move ${i + 1}` }),
@@ -884,7 +921,7 @@ function editor(m: C.Pokemon) {
       baseStats(m.species),
       h("div", { class: "stats" },
         h("div", { class: "statrow head" }, h("span", {}), h("span", {}, "IV"), h("span", {}, "EV"), h("span", {}, "Stat")),
-        STAT_LABELS.map((lab, i) => h("div", { class: "statrow" },
+        STAT_ORDER.map(i => [STAT_LABELS[i], i] as const).map(([lab, i]) => h("div", { class: "statrow" },
           h("span", { class: "statlab" }, lab),
           num(`mIv${i}`, m.ivs[i], 0, 31, v => editMon(x => { x.ivs[i] = v; }), { "aria-label": `${lab} IV` }),
           num(`mEv${i}`, m.evs[i], 0, 255, v => editMon(x => { x.evs[i] = v; }), { "aria-label": `${lab} EV` }),
@@ -910,7 +947,6 @@ function editor(m: C.Pokemon) {
       h("dl", { class: "facts" },
         h("dt", {}, "Personality"), h("dd", { class: "mono" }, `0x${m.pid.toString(16).toUpperCase().padStart(8, "0")}`),
         h("dt", {}, "Met at level"), h("dd", {}, m.metLevel === 0 ? "Hatched" : String(m.metLevel)),
-        h("dt", {}, "Ball"), h("dd", {}, st.save!.profile.engine === "vanilla" ? C.itemName(m.ball) : `Ball no. ${m.ball}`),
         h("dt", {}, "Format"), h("dd", {}, ci.label),
         m.party ? [h("dt", {}, "HP"), h("dd", {}, `${m.party.hp} / ${m.party.stats[0]}`)] : null)),
   );
@@ -933,8 +969,8 @@ function baseStats(species: number) {
   const abil = [...new Set(info.ab.filter(Boolean))];
   return h("div", { class: "basestats" },
     h("div", { class: "bshead" }, h("span", {}, "Base stats"), h("span", { class: "muted" }, `${C.speciesName(species)}`)),
-    STAT_LABELS.map((lab, i) => {
-      const v = info.bs[i];
+    STAT_ORDER.map(i => {
+      const lab = STAT_LABELS[i], v = info.bs[i];
       return h("div", { class: "bsrow" },
         h("span", { class: "statlab" }, lab),
         h("span", { class: "bsval" }, String(v)),
@@ -966,7 +1002,8 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
         toast(`${m.nickname || C.speciesName(m.species)} learned ${C.moveName(mv)}.`, "good");
       } }, "Teach");
   const row = (tag: string, mv: number, later = false) =>
-    h("li", { class: `learnrow ${later ? "later" : ""}` }, h("span", { class: "lrtag mono" }, tag), h("span", { class: "lrname" }, C.moveName(mv)), teachBtn(mv));
+    h("li", { class: `learnrow ${later ? "later" : ""}`, "data-type": moveType(mv) ?? "none" }, h("span", { class: "lrtag mono" }, tag),
+      h("span", { class: "lrname" }, h("span", {}, C.moveName(mv)), moveTypeBadge(mv)), teachBtn(mv));
   const group = (title: string, items: Node[], open: boolean, empty: string) =>
     h("details", { class: "learngroup", open },
       h("summary", {}, `${title} · ${items.length}`),
@@ -976,7 +1013,7 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
     h("h4", {}, "Moves it can learn"),
     h("div", { class: "teachto" }, h("span", { class: "muted small" }, "Teach into"),
       h("div", { class: "seg" }, [0, 1, 2, 3].map(i => h("button", { class: `segbtn ${slot === i ? "on" : ""}`, "aria-pressed": slot === i ? "true" : "false",
-        onclick: () => { st.teachSlot = i; renderAll(); } }, `${i + 1} · ${m.moves[i] ? C.moveName(m.moves[i]) : "empty"}`)))),
+        onclick: () => { st.teachSlot = i; renderAll(); }, "data-type": moveType(m.moves[i]) ?? "none" }, `${i + 1} · ${m.moves[i] ? C.moveName(m.moves[i]) : "empty"}`)))),
     lv === null ? h("p", { class: "note" }, "Level-up moves weren't found in this ROM.")
       : group("By level", lv.map(([l, mv]) => row(l === 0 ? "Evo" : `Lv ${l}`, mv, lvl !== null && l > lvl)), true, "Learns no moves by level."),
     sortedTeach === null ? h("p", { class: "note" }, `${L.teachTitle} compatibility wasn't found in this ROM.`)

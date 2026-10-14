@@ -146,17 +146,19 @@ export interface CodecInfo {
   id: CodecId; label: string; nickLen: number; maxSpecies: number; maxItem: number; maxMove: number;
   encrypted: boolean; storesPP: boolean; hasShinyMod: boolean; hasNatureMod: boolean; abilityKind: "bit" | "num" | "cfru";
   size: number;
+  /** Largest ball id the record can hold. */
+  maxBall: number;
 }
 
 export function codecInfo(id: CodecId): CodecInfo {
   if (id === "cfru-box") return {
     id, label: "CFRU PC (compressed)", nickLen: 10, maxSpecies: 0xffff, maxItem: 0xffff, maxMove: 1023,
-    encrypted: false, storesPP: false, hasShinyMod: false, hasNatureMod: false, abilityKind: "cfru", size: CFRU_BOX_SIZE,
+    encrypted: false, storesPP: false, hasShinyMod: false, hasNatureMod: false, abilityKind: "cfru", size: CFRU_BOX_SIZE, maxBall: 255,
   };
   const s = SPECS[id];
   return {
     id, label: s.label, nickLen: s.nickLen, maxSpecies: s.maxSpecies, maxItem: s.maxItem, maxMove: s.maxMove,
-    encrypted: true, storesPP: true, hasShinyMod: !!s.shinyMod, hasNatureMod: !!s.natureMod, abilityKind: s.ability.kind, size: BOX_SIZE,
+    encrypted: true, storesPP: true, hasShinyMod: !!s.shinyMod, hasNatureMod: !!s.natureMod, abilityKind: s.ability.kind, size: BOX_SIZE, maxBall: (1 << s.ball[2]) - 1,
   };
 }
 

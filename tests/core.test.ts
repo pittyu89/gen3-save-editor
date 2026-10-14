@@ -491,6 +491,8 @@ describe("learnsets", () => {
     expect(L.egg[1]).toEqual([10, 11]);
     expect(L.egg[3]).toEqual([12]);
     expect(L.egg[2]).toEqual([]);
+    // a hack with more moves than the name table the editor found still reads
+    expect(findLearnsets(r, N, 20, "BPEE", null).levelUp[7]).toEqual([[1, 33], [5, 8], [9, 45]]);
   });
   it("reads expansion pointers from species records", () => {
     const r = rom();

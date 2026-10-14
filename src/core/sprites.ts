@@ -182,3 +182,62 @@ export function decodeSprite(rom: Uint8Array, t: SpriteTables, species: number, 
   }
   return { width: W, height: H, rgba };
 }
+
+// ---- Item icons ----
+// Vanilla and CFRU keep gItemIconTable: per item { const u32 *lz77Tiles (24×24, 0x120 bytes); const u32 *lz77Palette }.
+// pokeemerald-expansion keeps the same two pointers inside each item record instead. Either way the
+// pairs repeat at a fixed stride, starting with item 0 (the "?" icon).
+
+export interface ItemIconTable { at: number; stride: number; count: number }
+
+const isIconPair = (rom: Uint8Array, a: number) => isLz(rom, ptr(rom, a), 0x120) && isLz(rom, ptr(rom, a + 4), 0x20);
+
+/** Finds the item icon table. `itemCount` is the number of items the editor knows. */
+export function findItemIcons(rom: Uint8Array, itemCount: number): ItemIconTable | null {
+  const runs: ItemIconTable[] = [];
+  for (const stride of [8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64]) {
+    for (let a = 0; a + stride * 4 <= rom.length; a += 4) {
+      if (!isIconPair(rom, a) || !isIconPair(rom, a + stride) || !isIconPair(rom, a + 2 * stride)) continue;
+      // walk the run, tolerating a few entries without icons
+      let n = 0, misses = 0, last = 0;
+      for (let i = 0; a + i * stride + 8 <= rom.length && i < 4000; i++) {
+        if (isIconPair(rom, a + i * stride)) { last = i; misses = 0; } else if (++misses > 4) break;
+        n = last + 1;
+      }
+      if (n >= Math.min(100, itemCount * 0.5)) runs.push({ at: a, stride, count: n });
+      a += Math.max(0, (n - 1) * stride) - 4 + 4;
+    }
+    if (runs.length) break;
+  }
+  if (!runs.length) return null;
+  // the live table is the one the code points at; old copies after a repoint are unreferenced
+  let best = runs[0], bestRefs = -1;
+  for (const r of runs) {
+    const v = 0x08000000 + r.at;
+    let refs = 0;
+    for (let a = 0; a + 4 <= rom.length; a += 4) if (u32(rom, a) === v) refs++;
+    if (refs > bestRefs || (refs === bestRefs && r.count > best.count)) { best = r; bestRefs = refs; }
+  }
+  return best;
+}
+
+/** Decodes a 24×24 item icon. Colour 0 is transparent. */
+export function decodeItemIcon(rom: Uint8Array, t: ItemIconTable, item: number): Sprite | null {
+  if (item < 0 || item >= t.count) return null;
+  const pTiles = ptr(rom, t.at + item * t.stride), pPal = ptr(rom, t.at + item * t.stride + 4);
+  if (pTiles === null || pPal === null) return null;
+  const tiles = lz77(rom, pTiles, 0x400), palRaw = lz77(rom, pPal, 0x20);
+  if (!tiles || tiles.length < 0x120 || !palRaw) return null;
+  const W = 24, rgba = new Uint8ClampedArray(W * W * 4);
+  for (let tile = 0; tile < 9; tile++) {
+    const tx = (tile % 3) * 8, ty = Math.floor(tile / 3) * 8;
+    for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+      const byte = tiles[tile * 32 + y * 4 + (x >> 1)];
+      const ci = x & 1 ? byte >> 4 : byte & 0xf;
+      if (ci === 0) continue;
+      const c = palRaw[ci * 2] | (palRaw[ci * 2 + 1] << 8), o = ((ty + y) * W + tx + x) * 4;
+      rgba[o] = ((c & 31) * 255 / 31) | 0; rgba[o + 1] = (((c >> 5) & 31) * 255 / 31) | 0; rgba[o + 2] = (((c >> 10) & 31) * 255 / 31) | 0; rgba[o + 3] = 255;
+    }
+  }
+  return { width: W, height: W, rgba };
+}

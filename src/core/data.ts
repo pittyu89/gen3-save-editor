@@ -20,6 +20,8 @@ export interface GameData {
   info: (SpeciesInfo | null)[];
   moves: string[];
   movePP: number[];
+  /** Type name of each move, when read from a ROM. */
+  moveTypes?: string[];
   items: string[];
   abilities: string[];
   shedinja: number;               // species index of Shedinja (HP is always 1), -1 if unknown
