@@ -715,14 +715,14 @@ function renderMain() {
       h("summary", {}, `Box ${st.box + 1} of ${n} settings`),
       h("div", { class: "fields cols2" },
         field("Box name", "boxName", h("input", {
-          id: "boxName", value: b.name, maxlength: 8, autocomplete: "off",
+          id: "boxName", value: b.name, maxlength: st.save!.profile.boxNameChars ?? 8, autocomplete: "off",
           onchange: (e: Event) => {
             const v = (e.target as HTMLInputElement).value;
             const bad = C.unencodable(v);
             if (bad.length) { toast(`The game can't show ${bad.join(" ")} in box names.`, "bad"); renderAll(); return; }
             b.name = v; touch();
           },
-        }), "Up to 8 characters"),
+        }), `Up to ${st.save!.profile.boxNameChars ?? 8} characters`),
         field("Wallpaper", "wallSel", select("wallSel", b.wallpaper, WALLPAPERS.map((w, i) => [i, w] as [number, string]).concat(b.wallpaper >= 16 ? [[b.wallpaper, `Wallpaper ${b.wallpaper}`]] : []),
           v => { b.wallpaper = Number(v); touch(); })))),
     h("div", { class: "phone-only" }, warningsPanel(s, null)));

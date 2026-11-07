@@ -682,3 +682,55 @@ describe("ROMs with their own species order", () => {
     expect(d.growthNames![gr]).toMatch(/\(modified\)$/);
   });
 });
+
+import { smol } from "../src/core";
+import { REGIONAL_TMS } from "./rom-fixture";
+
+describe("smol sprites (pokeemerald-expansion, Monomyth)", () => {
+  const header = (mode: number, size: number, sym: number, state: number, words: number, lo: number) => {
+    const h = new Uint8Array(8);
+    w32(h, 0, (mode | ((size / 4) << 4) | (sym << 18)) >>> 0);
+    w32(h, 4, (state | (words << 6) | (lo << 19)) >>> 0);
+    return h;
+  };
+  // literal 7 symbols, then the 8th repeated to fill 0x800 bytes (0x400 halfwords)
+  const LO = [0x00, 0x07, (0x3f8 & 0x7f) | 0x80, 0x3f8 >> 7, 0x01];
+
+  it("decodes plain (BASE_ONLY) data", () => {
+    const syms = [1, 2, 3, 4, 5, 6, 7, 8];
+    const rom = new Uint8Array(0x100);
+    rom.set(header(1, 0x800, 8, 0, 0, LO.length), 0x10);
+    syms.forEach((v, i) => w16(rom, 0x18 + i * 2, v));
+    rom.set(LO, 0x18 + 16);
+    const out = smol(rom, 0x10)!;
+    expect(out.length).toBe(0x800);
+    expect(Array.from({ length: 10 }, (_, i) => u16(out, i * 2))).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 8, 8]);
+    expect(u16(out, 0x7fe)).toBe(8);
+  });
+
+  it("decodes tANS, delta-coded symbols", () => {
+    // frequencies: symbol 1 = 63, symbol 2 = 1. From state 40 the decoder emits symbol 1 without reading
+    // bits for 41 nibbles, so with delta coding the nibbles count 1, 2, 3 ... (mod 16).
+    const rom = new Uint8Array(0x100);
+    rom.set(header(3, 0x800, 8, 40, 0, LO.length), 0x10);
+    w32(rom, 0x18, (63 << 6) | (1 << 12));
+    rom.set(LO, 0x18 + 12);
+    const out = smol(rom, 0x10)!;
+    const want = Array.from({ length: 8 }, (_, i) => [0, 1, 2, 3].reduce((v, n) => v | (((4 * i + n + 1) & 15) << (4 * n)), 0));
+    expect(Array.from({ length: 8 }, (_, i) => u16(out, i * 2))).toEqual(want);
+    expect(u16(out, 0x7fe)).toBe(want[7]);
+    expect(smol(rom, 0x11)).toBeNull();
+  });
+});
+
+describe("TM lists with their own length", () => {
+  it("reads 51 TMs plus Monomyth-style HMs and their compatibility", () => {
+    const rom = fakeRegionalRom();
+    const d = loadRomData(rom).data;
+    expect(d.learn!.report).toContain("TM/HM moves (51 TMs)");
+    expect(d.learn!.tmLabel.get(REGIONAL_TMS[0])).toBe("TM01");
+    expect(d.learn!.tmLabel.get(15)).toBe("HM01");
+    expect(d.learn!.tmLabel.get(300)).toBe("HM08");
+    expect(d.learn!.teach[3]).toContain(REGIONAL_TMS[3 % 59]);
+  });
+});

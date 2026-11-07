@@ -103,6 +103,7 @@ export function fakeRom(style: "inline" | "pointer"): Uint8Array {
 // and reordered, retuned EXP curves.
 export const REGIONAL_REAL = (i: number) => (i % 3 === 0 ? i + 1 : 0); // ROM index -> Gen III species, or 0 for a fakemon
 export const REGIONAL_CURVES = [2, 5, 3, 0, 4]; // ROM curve id -> standard growth rate
+export const REGIONAL_TMS = [...Array.from({ length: 51 }, (_, i) => 100 + i), 15, 19, 57, 70, 249, 127, 291, 300];
 export function fakeRegionalRom(): Uint8Array {
   const rom = new Uint8Array(0x200000);
   rom[0xb2] = 0x96;
@@ -131,6 +132,13 @@ export function fakeRegionalRom(): Uint8Array {
   for (let i = 0; i < VANILLA.moves.length; i++) rom.set(encodeBytes(VANILLA.moves[i])!.subarray(0, 13), mvBase + i * 13);
   for (let i = 0; i < abilities.length; i++) rom.set(encodeBytes(abilities[i])!.subarray(0, 13), 0xc0000 + i * 13);
   for (let i = 0; i < TYPES.length; i++) rom.set(encodeBytes(TYPES[i])!, 0xd0000 + i * 9);
+  // TM list with 51 TMs and HMs in Monomyth's order (Cut, Fly, Surf, Strength, Rock Smash, Waterfall, Dive,
+  // Rock Climb), a per-species bitfield, and code pointers to both
+  REGIONAL_TMS.forEach((m, i) => w16(rom, 0xf0000 + i * 2, m));
+  for (let sp = 1; sp < N; sp++) {
+    for (let t = 0; t < REGIONAL_TMS.length; t++) if ((sp * 7 + t * 3) % 5 < 2 || t === sp % 59) rom[0xf1000 + sp * 8 + (t >> 3)] |= 1 << (t & 7);
+  }
+  w32(rom, 0x1f0000, 0x080f0000); w32(rom, 0x1f0004, 0x080f1000);
   // EXP curves in their own order, each 1000 higher at level 100 than the standard one
   REGIONAL_CURVES.forEach((std, row) => {
     for (let l = 0; l <= 100; l++) w32(rom, 0xe0000 + row * 404 + l * 4, standardExp(std, l) + (l === 100 ? 1000 : 0));

@@ -2,7 +2,7 @@
 // Works without knowing the hack: tables are located by the names and base stats of entries that
 // every Gen III engine keeps (Bulbasaur, Pound, Master Ball, Stench...), and struct field offsets are
 // learned by matching values that never changed across engines. The ROM is only read, never modified.
-import { u32 } from "./binary";
+import { u32, countWord, romWords } from "./binary";
 import { encodeBytes, decodeStrict, decodeMessage } from "./text";
 import { GameData, SpeciesInfo, titleCase, TYPE_NAMES, VANILLA, GROWTH_NAMES, standardExp } from "./data";
 import { findLearnsets } from "./learnsets";
@@ -19,12 +19,24 @@ type Table = { kind: "inline" | "pointer"; at: number; stride: number; maxLen: n
 
 const norm = (s: string) => s.toUpperCase().replace(/[\s.\-']/g, "");
 
+const HIST = new WeakMap<Uint8Array, Uint32Array>();
+/** Byte frequencies of the ROM (cached), so searches can anchor on a pattern's rarest byte. */
+function histogram(rom: Uint8Array): Uint32Array {
+  let h = HIST.get(rom);
+  if (!h) { h = new Uint32Array(256); for (let i = 0; i < rom.length; i++) h[rom[i]]++; HIST.set(rom, h); }
+  return h;
+}
+
 function findAll(rom: Uint8Array, pat: Uint8Array, limit = 4000): number[] {
   const out: number[] = [];
-  const first = pat[0], n = pat.length, end = rom.length - n;
-  for (let i = 0; i <= end; i++) {
-    if (rom[i] !== first) continue;
-    let k = 1;
+  const n = pat.length, end = rom.length - n, h = histogram(rom);
+  let k0 = 0;
+  for (let k = 1; k < n; k++) if (h[pat[k]] < h[pat[k0]]) k0 = k;
+  const anchor = pat[k0];
+  for (let j = rom.indexOf(anchor, k0); j >= 0; j = rom.indexOf(anchor, j + 1)) {
+    const i = j - k0;
+    if (i > end) break;
+    let k = 0;
     while (k < n && rom[i + k] === pat[k]) k++;
     if (k === n) { out.push(i); if (out.length >= limit) break; }
   }
@@ -64,8 +76,11 @@ function findNameTable(rom: Uint8Array, names: [string, string, string], maxLen:
   }
   // Pointer tables: records holding a pointer to the name
   const targets = new Set(starts.map(a => (a + 0x08000000) >>> 0));
-  for (let at = 0; at + 4 <= rom.length; at += 4) {
-    if (!targets.has(u32(rom, at))) continue;
+  if (!targets.size) return null;
+  const words = romWords(rom);
+  for (let wi = 0; wi < words.length; wi++) {
+    if (!targets.has(words[wi])) continue;
+    const at = wi * 4;
     for (let s = 4; s <= 512; s += 4) {
       const t: Table = { kind: "pointer", at, stride: s, maxLen };
       if (matches(entry(rom, t, 2), 1) && matches(entry(rom, t, 3), 2)) return t;
@@ -210,7 +225,7 @@ function findMoveDescriptions(rom: Uint8Array, moveCount: number): string[] | nu
     a += Math.max(0, len - 1) * 4;
   }
   if (!runs.length) return null;
-  const refs = (t: number) => { const v = 0x08000000 + t; let n = 0; for (let a = 0; a + 4 <= rom.length; a += 4) if (u32(rom, a) === v) n++; return n; };
+  const refs = (t: number) => countWord(rom, 0x08000000 + t);
   // the table may start a word or two into a run (an unrelated text pointer just before it)
   let best: { at: number; len: number; refs: number } | null = null;
   for (const r of runs) for (let k = 0; k < 3; k++) {
@@ -309,7 +324,10 @@ function findBaseStatsByName(rom: Uint8Array, species: string[]): { at: number; 
   const seen = new Uint8Array(1 << 21); // bitmap of 24-bit prefixes
   for (const key of byPrefix.keys()) seen[key >>> 3] |= 1 << (key & 7);
   const hits: { at: number; i: number }[] = [];
+  const firstOk = new Uint8Array(256), secondOk = new Uint8Array(256);
+  for (const k of known) { firstOk[k.bs[0]] = 1; secondOk[k.bs[1]] = 1; }
   for (let o = 0; o + 6 <= rom.length && hits.length < 20000; o++) {
+    if (!firstOk[rom[o]] || !secondOk[rom[o + 1]]) continue;
     const key = rom[o] | (rom[o + 1] << 8) | (rom[o + 2] << 16);
     if (!(seen[key >>> 3] & (1 << (key & 7)))) continue;
     const list = byPrefix.get(key);
@@ -627,6 +645,10 @@ export function loadRomData(rom: Uint8Array): RomLoadResult {
     const rec = res.gf && res.gf.speciesNames !== null ? null : res.record;
     d.learn = findLearnsets(rom, d.species.length, d.moves.length, res.header.code, rec);
     res.report.push(...d.learn.report);
+    // name TMs after the game's own TM items when they line up (e.g. Monomyth's TM00 after TM50)
+    const machines = d.items.filter(n => /^(TM|HM)\d+$/.test(n));
+    const order = [...d.learn.tmLabel.keys()];
+    if (machines.length === order.length && order.length) order.forEach((mv, i) => d.learn!.tmLabel.set(mv, machines[i]));
   } catch { res.report.push("learnsets not found"); }
   return res;
 }

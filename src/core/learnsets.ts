@@ -9,7 +9,7 @@
 //             expansion    per-species u16 list ("teachable"), ends 0xFFFF
 //   egg       vanilla      one u16 list: 20000 + species, its moves, next species ..., ends 0xFFFF
 //             expansion    per-species u16 list, ends 0xFFFF
-import { u16, u32 } from "./binary";
+import { u16, u32, countWord, romWords, romHalves } from "./binary";
 
 export interface Learnsets {
   /** [level, move] pairs per species, in the game's order. */
@@ -35,10 +35,7 @@ const ptr = (rom: Uint8Array, at: number): number | null => {
 /** How many aligned words in the ROM point at `t`. Hacks that move a table leave the old copy behind,
  *  unreferenced; the live one is what the code points to. */
 function refs(rom: Uint8Array, t: number): number {
-  const v = 0x08000000 + t, b0 = v & 0xff, b1 = (v >> 8) & 0xff, b2 = (v >> 16) & 0xff, b3 = v >>> 24;
-  let n = 0;
-  for (let a = 0; a + 4 <= rom.length; a += 4) if (rom[a] === b0 && rom[a + 1] === b1 && rom[a + 2] === b2 && rom[a + 3] === b3) n++;
-  return n;
+  return countWord(rom, 0x08000000 + t);
 }
 function pickReferenced<T extends { at: number }>(rom: Uint8Array, cands: T[], mustBeUsed = false): T | null {
   if (mustBeUsed) { const used = cands.filter(c => refs(rom, c.at) > 0); return used.length ? pickReferenced(rom, used) : null; }
@@ -161,7 +158,34 @@ function findTmMoves(rom: Uint8Array, moveCount: number, anchor: number | null):
     const start = a - 100; // 50 TMs before the HMs
     if (valid(start, 58)) found.push({ at: start, tms: 50, total: 58 });
   }
-  return pickReferenced(rom, found, true); // an unreferenced list is a leftover the game no longer uses
+  const vanilla = pickReferenced(rom, found, true); // an unreferenced list is a leftover the game no longer uses
+  return vanilla ?? findTmMovesAnyCount(rom, valid);
+}
+
+/** Hacks with their own TM count or later HMs (e.g. Monomyth: 50 TMs + TM00, HMs Cut, Fly, Surf, Strength,
+ *  Rock Smash, Waterfall, Dive, Rock Climb): the list is located from HM01-04 and its start from the
+ *  code's pointer to it. Eight HMs are assumed, as every Gen III engine keeps HM01-08. */
+function findTmMovesAnyCount(rom: Uint8Array, valid: (at: number, total: number) => boolean): { at: number; tms: number; total: number } | null {
+  const H = romHalves(rom);
+  const hits: number[] = [];
+  for (let i = 20; i + 8 < H.length && hits.length < 50; i++) {
+    if (H[i] === 15 && H[i + 1] === 19 && H[i + 2] === 57 && H[i + 3] === 70) hits.push(i * 2);
+  }
+  if (!hits.length) return null;
+  // one pass over the ROM's words: which addresses up to 130 entries before a hit does code point at?
+  const lo = Math.max(0, Math.min(...hits) - 260), hi = Math.max(...hits);
+  const pointed = new Set<number>(), words = romWords(rom);
+  for (let i = 0; i < words.length; i++) {
+    const t = words[i] - 0x08000000;
+    if (t >= lo && t <= hi && !(t & 1)) pointed.add(t);
+  }
+  for (const a of hits) {
+    for (let tms = 20; tms <= 130; tms++) {
+      const start = a - tms * 2;
+      if (start >= 0 && pointed.has(start) && valid(start, tms + 8)) return { at: start, tms, total: tms + 8 };
+    }
+  }
+  return null;
 }
 
 const popcount = (v: number) => { let n = 0; while (v) { v &= v - 1; n++; } return n; };
@@ -215,8 +239,10 @@ function findTmTable(rom: Uint8Array, n: number, total: number, anchor: number |
       }
       return any;
     };
+    const W = romWords(rom);
     for (let a = 0; a + 4 * stride <= rom.length; a += 4) {
-      const z = !u32(rom, a) && !u32(rom, a + 4), f = u32(rom, a) === 0xffffffff;
+      const w0 = W[a >> 2];
+      const z = !w0 && !W[(a >> 2) + 1], f = w0 === 0xffffffff;
       if (!z && !f) continue;
       if (!entryOk(a + stride) || !entryOk(a + 2 * stride) || !entryOk(a + 3 * stride)) continue;
       const c = bitTableRun(rom, a, n, total, true, stride);
@@ -242,10 +268,11 @@ function findEggMoves(rom: Uint8Array, n: number, moveCount: number): (number[] 
     return null;
   };
   const found: { at: number; map: Map<number, number[]> }[] = [];
+  const H = romHalves(rom);
   for (let a = 0; a + 4 <= rom.length; a += 2) {
-    const v = u16(rom, a);
+    const v = H[a >> 1];
     if (v <= 20000 || v >= 20000 + n) continue;
-    const m = u16(rom, a + 2);
+    const m = H[(a >> 1) + 1];
     if (m === 0 || m >= moveCount) continue;
     const map = parse(a);
     if (map) { found.push({ at: a, map }); a += [...map.values()].reduce((x, l) => x + 2 + l.length * 2, 0); }

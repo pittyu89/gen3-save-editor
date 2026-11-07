@@ -32,6 +32,8 @@ export interface GameProfile {
   sectorCodec?: "zero-run";
   /** Bytes per box name field, terminator included (9 in vanilla). */
   boxNameBytes?: number;
+  /** Longest box name the game's naming screen allows (8 in vanilla). */
+  boxNameChars?: number;
   partyCodec: CodecId;
   boxCodec: CodecId;
   /** Which built-in data to use when no ROM is loaded. */
@@ -152,7 +154,8 @@ const MONOMYTH: Omit<GameProfile, "id" | "name" | "short" | "gameCode"> = {
     sb2: { name: 0x00, gender: 0x08, trainerId: 0x0a, playTime: 0x0e, securityKey: 0x40, familyMarker: 0xac },
     sb1: { partyCount: 0x239, party: 0x23c, money: 0x494, coins: 0x498 },
   },
-  boxCount: 14, boxSlots: 30, boxNameBytes: 21,
+  // naming screen template (title "Box name?") allows 10 characters
+  boxCount: 14, boxSlots: 30, boxNameBytes: 21, boxNameChars: 10,
   currentBox: { block: "storage", offset: 0 },
   boxSlot: (b, s) => ({ block: "storage", offset: 4 + (b * 30 + s) * 80 }),
   boxName: b => ({ block: "storage", offset: 0x8344 + b * 21 }),
