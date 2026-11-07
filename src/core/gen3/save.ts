@@ -15,6 +15,54 @@ export const SAVE_SIZE = 0x20000;
 
 export interface SectorInfo {
   physical: number; id: number; counter: number; checksum: number; checksumLength: number; valid: boolean;
+  /** Stored compressed (Monomyth's zero-run format); checksumLength is then the packed length. */
+  packed?: boolean;
+}
+
+// ---- Monomyth sector compression ----
+// The data area holds a u16 header (bit 15: starts with literal words; low 15 bits: packed length in
+// bytes, header included), then alternating runs: a u16 count of literal words followed by the words,
+// and a u16 count of zero words. 0xFF0 holds 1 when the sector is packed. The game splits at every
+// zero word, so encoding with maximal runs reproduces its output byte for byte.
+const PACK_FLAG = 0xff0;
+
+/** Packed length of a sector stored in the zero-run format, or 0 if it isn't one. */
+export function packedLength(bytes: Uint8Array, base: number): number {
+  if (u32(bytes, base + PACK_FLAG) !== 1) return 0;
+  const n = u16(bytes, base) & 0x7fff;
+  return n >= 4 && n <= PACK_FLAG ? n : 0;
+}
+
+/** Unpacks one zero-run sector into at most `cap` bytes. */
+export function zeroRunDecode(bytes: Uint8Array, base: number, cap: number): Uint8Array {
+  const out = new Uint8Array(cap);
+  const h = u16(bytes, base), end = base + (h & 0x7fff);
+  let lit = (h & 0x8000) !== 0, p = base + 2, o = 0;
+  while (p + 2 <= end && o < cap) {
+    const n = u16(bytes, p) * 2; p += 2;
+    if (lit) { out.set(bytes.subarray(p, p + Math.min(n, cap - o)), o); p += n; }
+    o += n;
+    lit = !lit;
+  }
+  return out;
+}
+
+export function zeroRunEncode(data: Uint8Array): Uint8Array {
+  const words = data.length >> 1;
+  const parts: number[] = [0, 0];
+  let first: boolean | null = null;
+  for (let i = 0; i < words;) {
+    const zero = u16(data, i * 2) === 0;
+    let j = i;
+    while (j < words && (u16(data, j * 2) === 0) === zero) j++;
+    if (first === null) first = !zero;
+    parts.push((j - i) & 0xff, (j - i) >> 8);
+    if (!zero) for (let k = i * 2; k < j * 2; k++) parts.push(data[k]);
+    i = j;
+  }
+  const out = Uint8Array.from(parts);
+  w16(out, 0, out.length | (first ? 0x8000 : 0));
+  return out;
 }
 
 export interface SlotInfo {
@@ -104,6 +152,9 @@ function readSlot(bytes: Uint8Array, index: 0 | 1): SlotInfo {
 /** Find the checksum length for a sector from the known struct sizes. */
 function resolveChecksum(bytes: Uint8Array, s: SectorInfo, candidates: number[]): void {
   const base = s.physical * SECTOR_SIZE;
+  const packed = packedLength(bytes, base);
+  // the game sums whole words only (CalculateChecksum takes size / 4)
+  if (packed && sectorChecksum(bytes, base, packed & ~3) === s.checksum) { s.checksumLength = packed; s.valid = true; s.packed = true; return; }
   for (const len of candidates) {
     if (len > 0 && sectorChecksum(bytes, base, len) === s.checksum) { s.checksumLength = len; s.valid = true; return; }
   }
@@ -206,11 +257,16 @@ export function detect(bytes: Uint8Array, dataFor: (p: GameProfile) => GameData 
     return { ok: false, family: null, suggestedProfile: null, ranking: [], activeSlot: null, slots, messages };
   }
   const s0 = active.sectors.find(s => s.id === 0)!;
-  const family = familyFromSb2(bytes.subarray(s0.physical * SECTOR_SIZE, s0.physical * SECTOR_SIZE + SECTOR_DATA));
+  const packed = active.sectors.some(s => s.packed);
+  const sb2raw = s0.packed ? zeroRunDecode(bytes, s0.physical * SECTOR_SIZE, SECTOR_DATA)
+    : bytes.subarray(s0.physical * SECTOR_SIZE, s0.physical * SECTOR_SIZE + SECTOR_DATA);
+  // Compressed sectors only come from games that compress; their SaveBlock2 doesn't follow vanilla's.
+  const candidates = packed ? PROFILES.filter(p => p.sectorCodec) : profilesForFamily(familyFromSb2(sb2raw));
+  const family = packed ? candidates[0].family : familyFromSb2(sb2raw);
 
   const ranking: ProfileRank[] = [];
   const seen = new Set<string>();
-  for (const p of profilesForFamily(family)) {
+  for (const p of candidates) {
     const key = `${p.engine}-${p.family}`;
     if (seen.has(key)) continue; // Ruby/Sapphire and FR/LG read identically
     seen.add(key);
@@ -236,15 +292,32 @@ function gather(bytes: Uint8Array, slot: SlotInfo, from: number, to: number, chu
   const out = new Uint8Array((to - from + 1) * chunk);
   for (let id = from; id <= to; id++) {
     const s = slot.sectors.find(x => x.id === id)!;
-    out.set(bytes.subarray(s.physical * SECTOR_SIZE, s.physical * SECTOR_SIZE + chunk), (id - from) * chunk);
+    const base = s.physical * SECTOR_SIZE;
+    out.set(s.packed ? zeroRunDecode(bytes, base, chunk) : bytes.subarray(base, base + chunk), (id - from) * chunk);
   }
   return out;
 }
 
-function scatter(bytes: Uint8Array, slot: SlotInfo, from: number, block: Uint8Array, chunk: number): void {
+function scatter(bytes: Uint8Array, slot: SlotInfo, from: number, block: Uint8Array, chunk: number, p?: GameProfile): void {
   for (let i = 0; i * chunk < block.length; i++) {
     const s = slot.sectors.find(x => x.id === from + i)!;
-    bytes.set(block.subarray(i * chunk, (i + 1) * chunk), s.physical * SECTOR_SIZE);
+    const base = s.physical * SECTOR_SIZE;
+    if (p?.sectorCodec !== "zero-run") { bytes.set(block.subarray(i * chunk, (i + 1) * chunk), base); continue; }
+    // Pack like the game does; if that wouldn't fit, store the data plainly (flag 0), which it also reads.
+    const size = p.sectionSizes[s.id] || chunk;
+    const data = block.subarray(i * chunk, i * chunk + size);
+    const packed = zeroRunEncode(data);
+    if (packed.length <= PACK_FLAG) {
+      bytes.set(packed, base);
+      bytes.fill(0xff, base + packed.length, base + PACK_FLAG);
+      w32(bytes, base + PACK_FLAG, 1);
+      s.packed = true; s.checksumLength = packed.length;
+    } else {
+      bytes.set(data, base);
+      bytes.fill(0, base + size, base + PACK_FLAG);
+      w32(bytes, base + PACK_FLAG, 0);
+      s.packed = false; s.checksumLength = size;
+    }
   }
 }
 
@@ -270,14 +343,16 @@ export function parse(input: Uint8Array, profile: GameProfile, slotIndex?: 0 | 1
   const warnings = [...messages, ...slot.problems];
 
   // CFRU's compressed boxes fix its layout; other profiles follow what the save itself uses.
-  const c = profile.engine === "cfru" || profile.chunk > SECTOR_DATA ? profile.chunk : Math.max(profile.chunk, detectChunk(bytes, slot));
+  const c = profile.engine === "cfru" || profile.sectorCodec || profile.chunk > SECTOR_DATA ? profile.chunk : Math.max(profile.chunk, detectChunk(bytes, slot));
+  if (profile.sectorCodec && !slot.sectors.some(s => s.packed)) warnings.push(`This save isn't compressed the way ${profile.name} saves are. Values may read wrong.`);
+  if (!profile.sectorCodec && slot.sectors.some(s => s.packed)) warnings.push(`This save's sectors are compressed, which ${profile.name} doesn't do. Values may read wrong.`);
   const blocks: Record<Block, Uint8Array> = {
     sb2: gather(bytes, slot, 0, 0, c), sb1: gather(bytes, slot, 1, 4, c), storage: gather(bytes, slot, 5, 13, c),
     ext: gatherExt(bytes, profile),
   };
   const { sb2, sb1, storage } = blocks;
   const fam = familyFromSb2(sb2);
-  if (fam !== profile.family) warnings.push(`This save looks like ${fam === "RS" ? "Ruby/Sapphire" : fam === "E" ? "Emerald" : "FireRed/LeafGreen"}, but ${profile.name} is selected. Values may read wrong.`);
+  if (fam !== profile.family && !profile.sectorCodec) warnings.push(`This save looks like ${fam === "RS" ? "Ruby/Sapphire" : fam === "E" ? "Emerald" : "FireRed/LeafGreen"}, but ${profile.name} is selected. Values may read wrong.`);
 
   const o2 = profile.offsets.sb2, o1 = profile.offsets.sb1;
   const securityKey = o2.securityKey !== undefined ? u32(sb2, o2.securityKey) : 0;
@@ -313,7 +388,7 @@ export function parse(input: Uint8Array, profile: GameProfile, slotIndex?: 0 | 1
       slotsInBox.push(m);
     }
     const nl = profile.boxName(b), wl = profile.wallpaper(b);
-    boxes.push({ name: decodeText(at(blocks, nl), nl.offset, 8), wallpaper: at(blocks, wl)[wl.offset], slots: slotsInBox });
+    boxes.push({ name: decodeText(at(blocks, nl), nl.offset, (profile.boxNameBytes ?? 9) - 1), wallpaper: at(blocks, wl)[wl.offset], slots: slotsInBox });
   }
 
   const plausible = fitScores.filter(x => x >= 0.8).length;
@@ -360,19 +435,21 @@ export function write(save: ParsedSave): Uint8Array {
       else if (decodePokemon(blk, l.offset, false, p.boxCodec)) clearRecord(blk, l.offset, recSize);
     });
     const nl = p.boxName(b), wl = p.wallpaper(b);
-    if (decodeText(blocks[nl.block], nl.offset, 8) !== box.name) encodeText(box.name, blocks[nl.block], nl.offset, 9);
+    const nb = p.boxNameBytes ?? 9;
+    if (decodeText(blocks[nl.block], nl.offset, nb - 1) !== box.name) encodeText(box.name, blocks[nl.block], nl.offset, nb);
     blocks[wl.block][wl.offset] = box.wallpaper;
   });
 
   const out = save.bytes.slice();
   const c = save.chunk ?? p.chunk;
-  scatter(out, save.slot, 0, sb2, c);
-  scatter(out, save.slot, 1, sb1, c);
-  scatter(out, save.slot, 5, blocks.storage, c);
+  scatter(out, save.slot, 0, sb2, c, p);
+  scatter(out, save.slot, 1, sb1, c, p);
+  scatter(out, save.slot, 5, blocks.storage, c, p);
   p.extSectors.forEach((sec, i) => out.set(blocks.ext.subarray(i * p.chunk, (i + 1) * p.chunk), sec * SECTOR_SIZE));
   for (const s of save.slot.sectors) {
     const base = s.physical * SECTOR_SIZE;
     let len = s.checksumLength || p.sectionSizes[s.id];
+    if (p.sectorCodec) { w16(out, base + 0xff6, sectorChecksum(out, base, len & ~3)); continue; }
     // In hacks that fill the whole sector, edits can reach past 3968 bytes; the checksum must cover them.
     if (c > SECTOR_DATA && len === SECTOR_DATA) len = c;
     w16(out, base + 0xff6, sectorChecksum(out, base, len));

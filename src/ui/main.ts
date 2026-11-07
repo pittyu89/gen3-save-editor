@@ -867,7 +867,7 @@ function editor(m: C.Pokemon) {
 
   const reroll = (want: Parameters<typeof C.rerollPid>[1]) => {
     const keep = {
-      nature: C.pidNature(m), gender: fixedGender ? undefined : (g as "M" | "F"), shiny: C.isShiny(m),
+      nature: ci.natures ? C.pidNature(m) : undefined, gender: fixedGender ? undefined : (g as "M" | "F"), shiny: C.isShiny(m),
       parity: isCfru && m.abilityNum < 2 ? m.pid & 1 : undefined,
     };
     const pid = C.rerollPid(m, { ...keep, ...want });
@@ -949,8 +949,8 @@ function editor(m: C.Pokemon) {
         field("Poké Ball", "mBall", pickButton("mBall", C.ballName(st.save!.profile.engine, m.ball), {
           icon: (() => { const it = C.ballItem(st.save!.profile.engine, m.ball); return it === null ? null : itemIconURL(it); })(),
           onclick: () => openPicker({ title: "Poké Ball", options: ballPickOptions(ci.maxBall), current: m.ball, onPick: v => editMon(x => { x.ball = v; }) }) })),
-        field("Nature", "mNature", select("mNature", C.nature(m), C.NATURES.map((n, i) => [i, n] as [number, string]),
-          v => ci.hasNatureMod ? editMon(x => { x.natureMod = (x.pid % 25) ^ Number(v); }) : reroll({ nature: Number(v) }))),
+        ci.natures ? field("Nature", "mNature", select("mNature", C.nature(m), C.NATURES.map((n, i) => [i, n] as [number, string]),
+          v => ci.hasNatureMod ? editMon(x => { x.natureMod = (x.pid % 25) ^ Number(v); }) : reroll({ nature: Number(v) }))) : null,
         field("Ability", "mAbility", abilitySlots.length > 1
           ? select("mAbility", m.abilityNum, abilitySlots, v => setAbility(Number(v)))
           : h("input", { id: "mAbility", value: abilitySlots[0]?.[1] ?? "—", disabled: true })),
@@ -966,6 +966,8 @@ function editor(m: C.Pokemon) {
       ),
       h("p", { class: "note" }, ci.hasNatureMod
         ? "This engine stores shininess and the stat nature separately, so changing them keeps the personality value. Changing gender picks a new one."
+        : !ci.natures
+          ? "This game has no natures, so stats get no nature boost. Gender and shininess come from the personality value; changing one picks a new value and keeps the other."
         : isCfru
           ? "In CFRU the normal ability slot comes from the personality value, like nature, gender and shininess. Changing one picks a new value and keeps the others."
           : "In Gen III, nature, gender and shininess all come from one personality value, so changing any of them picks a new one and keeps the other two."),
@@ -1056,7 +1058,7 @@ function baseStats(species: number) {
     h("dl", { class: "facts" },
       h("dt", {}, "Type"), h("dd", {}, info.t.join(" / ")),
       h("dt", {}, "Abilities"), h("dd", {}, abil.map((a, i) => `${C.abilityName(a)}${a === info.ab[2] && a !== info.ab[0] && a !== info.ab[1] ? " (hidden)" : ""}${i < abil.length - 1 ? ", " : ""}`).join("") || "—"),
-      h("dt", {}, "Growth"), h("dd", {}, info.gr === null ? "Unknown" : GROWTH[info.gr] ?? "Unknown"),
+      h("dt", {}, "Growth"), h("dd", {}, info.gr === null ? "Unknown" : (C.data().growthNames ?? GROWTH)[info.gr] ?? "Unknown"),
       h("dt", {}, "Gender"), h("dd", {}, genderRatio(info.g))));
 }
 

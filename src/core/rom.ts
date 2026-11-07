@@ -4,7 +4,7 @@
 // learned by matching values that never changed across engines. The ROM is only read, never modified.
 import { u32 } from "./binary";
 import { encodeBytes, decodeStrict, decodeMessage } from "./text";
-import { GameData, SpeciesInfo, titleCase, TYPE_NAMES } from "./data";
+import { GameData, SpeciesInfo, titleCase, TYPE_NAMES, VANILLA, GROWTH_NAMES, standardExp } from "./data";
 import { findLearnsets } from "./learnsets";
 
 export interface RomHeader { title: string; code: string; maker: string; size: number; isGba: boolean }
@@ -262,6 +262,191 @@ function learnCategories(count: number, size: number, byteAt: (mv: number, k: nu
   return null;
 }
 
+// ---- Hacks with their own species order (regional dex, fakemon) ----
+// Nothing sits at a fixed national number, so tables are found from entry 0 (which vanilla code keeps)
+// and from the real Pokémon the hack still has, matched by name.
+
+/** Longest inline name table whose entry 0 is `zero` ("??????????" for species, "-------" for abilities). */
+function findTableByEntryZero(rom: Uint8Array, zero: string, strides: number[], min: number): Table | null {
+  const enc = encodeBytes(zero);
+  if (!enc) return null;
+  let best: Table | null = null, bestN = 0;
+  for (const a of findAll(rom, enc, 4000)) {
+    for (const st of strides) {
+      if (decodeStrict(rom, a, st) !== zero) continue;
+      let n = 0, misses = 0;
+      for (let i = 1; i <= 2047 && misses <= 3; i++) {
+        const t = decodeStrict(rom, a + i * st, st);
+        if (t === null || t === "" || t[0] === " " || /^[a-z]/.test(t)) { misses++; continue; }
+        misses = 0; n++;
+      }
+      if (n > bestN) { bestN = n; best = { kind: "inline", at: a + st, stride: st, maxLen: st }; }
+    }
+  }
+  return bestN >= min ? best : null;
+}
+
+/** Built-in Gen III species data keyed by normalized name. */
+function referenceByName(): Map<string, SpeciesInfo> {
+  const m = new Map<string, SpeciesInfo>();
+  VANILLA.species.forEach((n, i) => { const inf = VANILLA.info[i]; if (n && inf) m.set(norm(n), inf); });
+  return m;
+}
+
+/** Base stats located from the real Pokémon in the hack's own species list: every record whose six
+ *  stats match the Gen III values votes for a table start and stride. Hacks rebalance some; most survive. */
+function findBaseStatsByName(rom: Uint8Array, species: string[]): { at: number; stride: number } | null {
+  const ref = referenceByName();
+  const known: { i: number; bs: number[] }[] = [];
+  species.forEach((n, i) => { const r = i > 0 && n ? ref.get(norm(n)) : undefined; if (r && r.bs.some(v => v)) known.push({ i, bs: r.bs }); });
+  if (known.length < 8) return null;
+  // one pass over the ROM: 3-byte prefix filter, then the full six bytes
+  const byPrefix = new Map<number, { i: number; bs: number[] }[]>();
+  for (const k of known) {
+    const key = k.bs[0] | (k.bs[1] << 8) | (k.bs[2] << 16);
+    (byPrefix.get(key) ?? byPrefix.set(key, []).get(key)!).push(k);
+  }
+  const seen = new Uint8Array(1 << 21); // bitmap of 24-bit prefixes
+  for (const key of byPrefix.keys()) seen[key >>> 3] |= 1 << (key & 7);
+  const hits: { at: number; i: number }[] = [];
+  for (let o = 0; o + 6 <= rom.length && hits.length < 20000; o++) {
+    const key = rom[o] | (rom[o + 1] << 8) | (rom[o + 2] << 16);
+    if (!(seen[key >>> 3] & (1 << (key & 7)))) continue;
+    const list = byPrefix.get(key);
+    if (!list) continue;
+    for (const k of list) if (rom[o + 3] === k.bs[3] && rom[o + 4] === k.bs[4] && rom[o + 5] === k.bs[5]) hits.push({ at: o, i: k.i });
+  }
+  // pairs of hits imply a stride and table start; the most common pair wins
+  const votes = new Map<string, number>();
+  hits.sort((a, b) => a.at - b.at);
+  for (let x = 0; x < hits.length; x++) {
+    for (let y = x + 1; y < hits.length && hits[y].at - hits[x].at <= 256 * 2048; y++) {
+      const di = hits[y].i - hits[x].i, da = hits[y].at - hits[x].at;
+      if (di <= 0 || da % di) continue;
+      const st = da / di;
+      if (st < 6 || st > 256) continue;
+      const key = `${hits[x].at - (hits[x].i - 1) * st}:${st}`;
+      votes.set(key, (votes.get(key) ?? 0) + 1);
+    }
+  }
+  let best: string | null = null, bv = 0;
+  for (const [k, v] of votes) if (v > bv) { best = k; bv = v; }
+  if (!best || bv < 10) return null;
+  const [at, stride] = best.split(":").map(Number);
+  return at >= 0 ? { at, stride } : null;
+}
+
+// Exp curves: gExperienceTables[rate][0..100] as u32. Hacks may reorder or retune them.
+const EXP_ROW = 101 * 4;
+interface ExpCurves { rows: number[][]; std: (number | null)[]; exact: boolean[] }
+function findExpTables(rom: Uint8Array): ExpCurves | null {
+  const pat = new Uint8Array(24);
+  [0, 1, 8, 27, 64, 125].forEach((v, k) => { pat[k * 4] = v; });
+  const isRow = (o: number) => {
+    if (o < 0 || o + EXP_ROW > rom.length || u32(rom, o) !== 0 || u32(rom, o + 4) !== 1) return false;
+    for (let n = 2; n <= 100; n++) if (u32(rom, o + n * 4) < u32(rom, o + (n - 1) * 4) || u32(rom, o + n * 4) > 2e7) return false;
+    return true;
+  };
+  for (const a of findAll(rom, pat, 50)) {
+    if (!isRow(a)) continue;
+    let start = a;
+    while (isRow(start - EXP_ROW)) start -= EXP_ROW;
+    const rows: number[][] = [];
+    for (let o = start; isRow(o) && rows.length < 16; o += EXP_ROW) rows.push(Array.from({ length: 101 }, (_, n) => u32(rom, o + n * 4)));
+    if (rows.length < 4) continue;
+    // name each row after the standard curve it follows up to level 50 (hacks retune the late levels)
+    const std = rows.map(r => {
+      let best: number | null = null, bn = 0;
+      for (let g = 0; g < 6; g++) {
+        let n = 0; for (let l = 1; l <= 50; l++) if (r[l] === standardExp(g, l)) n++;
+        if (n > bn) { bn = n; best = g; }
+      }
+      return bn >= 45 ? best : null;
+    });
+    const exact = rows.map((r, i) => std[i] !== null && r.every((v, l) => v === standardExp(std[i]!, l)));
+    return { rows, std, exact };
+  }
+  return null;
+}
+// Species that are Fairy-type in every game that has the type; their unmapped type id is Fairy.
+const FAIRY_NAMES = new Set(["CLEFAIRY", "CLEFABLE", "CLEFFA", "SNUBBULL", "GRANBULL", "TOGEPI", "SWIRLIX", "SLURPUFF",
+  "SPRITZEE", "AROMATISSE", "SYLVEON", "FLABEBE", "FLOETTE", "FLORGES", "COMFEY", "XERNEAS"]);
+
+/** Field offsets of a base-stats table learned from the real Pokémon a hack kept, by name. Values only need
+ *  to agree for most of them, since hacks retune some species. */
+function learnByName(rom: Uint8Array, bs: { at: number; stride: number }, sp: string[], abilities: string[], curves: ExpCurves | null) {
+  const ref = referenceByName();
+  const rec = (i: number) => bs.at + (i - 1) * bs.stride;
+  const known = sp.map((n, i) => (i > 0 && n ? ref.get(norm(n)) : undefined));
+  const idx = known.flatMap((k, i) => (k && rec(i) + bs.stride <= rom.length ? [i] : []));
+  const missing: string[] = [];
+  const val = (o: number, w: number) => (w === 1 ? rom[o] : rom[o] | (rom[o + 1] << 8));
+  const learn = (want: (i: number) => number | null, opts: { width?: number; share?: number; skip?: number[]; same?: (v: number, w: number) => boolean } = {}) => {
+    const w = opts.width ?? 1, same = opts.same ?? ((v, x) => v === x);
+    let best: number | null = null, bn = 0, bt = 0;
+    for (let k = 6; k + w <= bs.stride; k++) {
+      if (opts.skip?.includes(k)) continue;
+      let n = 0, t = 0;
+      for (const i of idx) { const x = want(i); if (x === null) continue; t++; if (same(val(rec(i) + k, w), x)) n++; }
+      if (n > bn) { bn = n; bt = t; best = k; }
+    }
+    return best !== null && bt >= 5 && bn >= bt * (opts.share ?? 0.7) ? best : null;
+  };
+  const g = learn(i => known[i]!.g);
+  // growth ids follow this ROM's EXP curves, which a hack may reorder
+  const toRom = new Map<number, number>();
+  curves?.std.forEach((s, r) => { if (s !== null && !toRom.has(s)) toRom.set(s, r); });
+  const gr = learn(i => { const v = known[i]!.gr; return v === null ? null : curves ? toRom.get(v) ?? null : v; }, { skip: g === null ? [] : [g] });
+  const abName = (id: number) => norm(abilities[id] ?? "");
+  const wantAb = (i: number) => { const id = known[i]!.ab[0]; return id ? id : null; };
+  const sameAb = (v: number, id: number) => abName(v) !== "" && abName(v) === norm(VANILLA.abilities[id] ?? "?");
+  let abW = 1, ab = learn(wantAb, { share: 0.5, same: sameAb });
+  if (ab === null) { abW = 2; ab = learn(wantAb, { width: 2, share: 0.5, same: sameAb }); }
+  let hid: number | null = null;
+  if (ab !== null && ab + 3 * abW <= bs.stride) {
+    let ok = 0, n = 0;
+    for (let i = 1; i < sp.length && rec(i) + bs.stride <= rom.length; i++) { n++; if (val(rec(i) + ab + 2 * abW, abW) < abilities.length) ok++; }
+    if (n && ok === n) hid = ab + 2 * abW;
+  }
+  // type ids: majority vote over the kept Pokémon (one byte each at +6/+7, as everywhere else)
+  const votes = new Map<number, Map<string, number>>();
+  const vote = (b: number, t: string) => { const m = votes.get(b) ?? votes.set(b, new Map()).get(b)!; m.set(t, (m.get(t) ?? 0) + 1); };
+  for (const i of idx) { const t = known[i]!.t; vote(rom[rec(i) + 6], t[0]); vote(rom[rec(i) + 7], t[t.length - 1]); }
+  const typeMap = new Map<number, string>();
+  for (const [b, m] of votes) { let bt = "", bn = 0; for (const [t, n] of m) if (n > bn) { bn = n; bt = t; } typeMap.set(b, bt); }
+  // the game's own type names (gTypeNames), when present, settle every id
+  const tt = findNameTable(rom, ["Normal", "Fighting", "Flying"], 9);
+  if (tt) for (let id = 0; id < 32; id++) {
+    const n = entry(rom, tt, id + 1);
+    const name = n === null ? null : titleCase(n.trim());
+    if (name && (TYPE_NAMES as readonly string[]).includes(name)) typeMap.set(id, name);
+    else if (name === null || !/^[?A-Z]/.test(name)) break;
+  }
+  // Gen III data has no Fairy type: species that are Fairy everywhere else tell its id
+  sp.forEach((n, i) => {
+    if (!i || !FAIRY_NAMES.has(norm(n).replace("É", "E")) || rec(i) + 8 > rom.length) return;
+    for (const k of [6, 7]) { const b = rom[rec(i) + k]; const cur = typeMap.get(b); if (!cur || cur === "Normal") { if (!cur || (votes.get(b)?.get("Normal") ?? 0) < 3) typeMap.set(b, "Fairy"); } }
+  });
+  if (g === null) missing.push("gender ratio");
+  if (gr === null) missing.push("growth rate");
+  if (ab === null) missing.push("abilities");
+  const info: (SpeciesInfo | null)[] = sp.map((_, i) => {
+    const o = rec(i);
+    if (!i || o + bs.stride > rom.length) return null;
+    const a1 = ab === null ? 0 : val(o + ab, abW), a2 = ab === null ? 0 : val(o + ab + abW, abW);
+    return {
+      bs: Array.from(rom.subarray(o, o + 6)),
+      t: [...new Set([typeMap.get(rom[o + 6]) ?? "Mystery", typeMap.get(rom[o + 7]) ?? "Mystery"])],
+      g: g === null ? 255 : rom[o + g],
+      gr: gr === null ? null : rom[o + gr] < (curves?.rows.length ?? 6) ? rom[o + gr] : null,
+      ab: [a1, a2 === a1 ? 0 : a2, hid === null ? 0 : val(o + hid, abW)],
+    };
+  });
+  return { info, missing };
+}
+
+const standardCurves = (c: ExpCurves) => c.rows.length >= 6 && c.std.slice(0, 6).every((g, i) => g === i) && c.exact.slice(0, 6).every(Boolean);
+
 // ---- Species base stats ----
 
 const BASE: Record<number, number[]> = {
@@ -343,14 +528,16 @@ export function readGfHeader(rom: Uint8Array): GfHeader | null {
   const name = String.fromCharCode(...rom.subarray(0x108, 0x128)).replace(/\0.*$/s, "");
   if (!/^pokemon /.test(name)) return null;
   const P = (o: number) => ptrTo(rom, o);
+  const S = (o: number) => { const v = u32(rom, o); return v < 0x10000 ? v : 0; };
   return {
     gameName: name,
     frontPics: P(0x128), normalPalettes: P(0x130), shinyPalettes: P(0x134),
     speciesNames: P(0x144), moveNames: P(0x148),
     speciesInfo: P(0x1bc), abilityNames: P(0x1c0), items: P(0x1c8), moves: P(0x1cc),
     pokemonNameLength: rom[0x176],
-    saveBlock2Size: u32(rom, 0x188), saveBlock1Size: u32(rom, 0x18c), partyCountOffset: u32(rom, 0x190), partyOffset: u32(rom, 0x194),
-    trainerIdOffset: u32(rom, 0x19c), playerNameOffset: u32(rom, 0x1a0),
+    // some hacks overwrite this part of the header with code; 0 marks a value that can't be a save offset
+    saveBlock2Size: S(0x188), saveBlock1Size: S(0x18c), partyCountOffset: S(0x190), partyOffset: S(0x194),
+    trainerIdOffset: S(0x19c), playerNameOffset: S(0x1a0),
   };
 }
 
@@ -470,7 +657,10 @@ function loadTables(rom: Uint8Array): RomLoadResult {
 }
 
 function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit<RomLoadResult, "gf"> {
-  const spTable = findNameTable(rom, ["Bulbasaur", "Ivysaur", "Venusaur"], 13);
+  const bulbasaur = findNameTable(rom, ["Bulbasaur", "Ivysaur", "Venusaur"], 13);
+  // no Bulbasaur at #1: a hack with its own species order (regional dex, fakemon)
+  const regional = !bulbasaur;
+  const spTable = bulbasaur ?? findTableByEntryZero(rom, "??????????", [11, 12, 13], 100);
   if (!spTable) throw new Error("Couldn't find this ROM's Pokémon tables. It may be a hack whose engine this editor doesn't know yet.");
   const mvTable = findNameTable(rom, ["Pound", "Karate Chop", "Double Slap"], 17);
   // inline name tables often sit back to back; species names end where the move names begin
@@ -531,13 +721,25 @@ function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit
   const items = itTable ? readNames(rom, itTable, 1500) : [""];
   report.push(itTable ? `${items.length - 1} items` : "item names not found");
 
-  const abTable = findNameTable(rom, ["Stench", "Drizzle", "Speed Boost"], 17);
+  const abTable = findNameTable(rom, ["Stench", "Drizzle", "Speed Boost"], 17)
+    ?? (regional ? findTableByEntryZero(rom, "-------", [13, 17], 50) : null);
   const abilities = abTable ? readNames(rom, abTable, 1000) : [""];
   report.push(abTable ? `${abilities.length - 1} abilities` : "ability names not found");
 
-  const bs = findBaseStats(rom);
+  const curves = findExpTables(rom);
+  let expTable: number[][] | undefined, growthNames: string[] | undefined;
+  const bs = regional ? findBaseStatsByName(rom, sp) : findBaseStats(rom);
   const info: (SpeciesInfo | null)[] = sp.map(() => null);
-  if (bs) {
+  if (bs && regional) {
+    const r = learnByName(rom, bs, sp, abilities, curves);
+    info.splice(0, info.length, ...r.info);
+    if (curves && !standardCurves(curves)) {
+      expTable = curves.rows;
+      growthNames = curves.rows.map((_, i) => curves.std[i] === null ? `Curve ${i}` : GROWTH_NAMES[curves.std[i]!] + (curves.exact[i] ? "" : " (modified)"));
+    }
+    report.push(`base stats (${bs.stride}-byte records, found by name${r.missing.length ? `; ${r.missing.join(", ")} not found` : ""})`);
+    if (expTable) report.push("custom EXP curves");
+  } else if (bs) {
     const rec = (i: number) => bs.at + (i - 1) * bs.stride;
     const g = learnField(rom, bs.at, bs.stride, GENDER);
     const gr = learnField(rom, bs.at, bs.stride, GROWTH);
@@ -590,7 +792,7 @@ function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit
     species: sp, nat, info,
     moves, movePP: ppAll ?? moves.map(() => 0), moveTypes: moveTypes ?? undefined, movePower, moveAcc, moveCat,
     moveDesc: findMoveDescriptions(rom, moves.length) ?? undefined,
-    items, abilities, shedinja,
+    items, abilities, shedinja, expTable, growthNames,
     notes: report.filter(r => /not found/.test(r)),
   };
   return { data: gameData, header, report, record: bs };

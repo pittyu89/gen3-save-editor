@@ -4,6 +4,7 @@
 //   expansion <1.8 the ball's item id, 5 bits
 //   CFRU          enum BallTypes (0 Master, 1 Ultra …) — include/new/catching.h
 //   compact       4 bits, read as the ball's item id (Emerald Z keeps balls first in its item list)
+//   monomyth      the ball's item id, 5 bits (as expansion <1.8)
 import { data } from "./data";
 import type { Engine } from "./profiles";
 
@@ -22,7 +23,7 @@ const isBallName = (n: string | undefined) => !!n && /ball$/i.test(n.trim());
 export function ballChoices(engine: Engine): [number, string][] {
   if (engine === "pex-modern") return PEX.map((n, i) => [i, n]);
   if (engine === "cfru") return CFRU.map((n, i) => [i, n]);
-  const items = data().items, max = engine === "pex-legacy" ? 31 : 15;
+  const items = data().items, max = engine === "pex-legacy" || engine === "monomyth" ? 31 : 15;
   const out: [number, string][] = [];
   for (let i = 1; i <= max; i++) {
     const n = items[i];
@@ -40,7 +41,7 @@ const key = (s: string) => s.toLowerCase().replace(/é/g, "e").replace(/[^a-z]/g
 
 /** The item id with this ball's name, for showing its icon. */
 export function ballItem(engine: Engine, id: number): number | null {
-  if ((engine === "vanilla" || engine === "pex-legacy" || engine === "compact") && isBallName(data().items[id])) return id;
+  if ((engine === "vanilla" || engine === "pex-legacy" || engine === "compact" || engine === "monomyth") && isBallName(data().items[id])) return id;
   const want = key(ballName(engine, id));
   const i = data().items.findIndex(n => n && key(n) === want);
   return i > 0 ? i : null;

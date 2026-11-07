@@ -12,6 +12,8 @@ A browser-only save editor for GBA Pokémon games and the two main ROM hack engi
 | pex-modern | BPEE | pokeemerald-expansion 1.8 → 1.17 | rh-hideout/pokeemerald-expansion (tags 1.8.0–1.17.1) |
 | pex-legacy | BPEE | pokeemerald-expansion 1.0 → 1.7 | same repo, tags 1.0.0–1.7.x |
 | cfru | BPRE | CFRU (Complete FireRed Upgrade) | Skeli789/Complete-Fire-Red-Upgrade |
+| monomyth | BPEE | Pokémon Monomyth | reverse-engineered from the v1.1 ROM and a real save |
+| compact | BPEE | compact unencrypted records (e.g. Emerald Z) | reverse-engineered from Emerald Z 1.2.0 saves |
 
 Western-language releases (EU, Rev 1) share the vanilla layouts. Japanese saves are not supported (different text table).
 
@@ -21,6 +23,8 @@ Western-language releases (EU, Rev 1) share the vanilla layouts. Japanese saves 
 - **pokeemerald-expansion 1.0–1.7** keeps vanilla-size fields but moves the ball into the Growth block and uses a 2-bit ability number.
 - Both expansion formats keep Emerald's SaveBlock prefix (trainer, key, party, money, coins) and PC layout. Later SaveBlock fields depend on each hack's config, so Battle Points are not offered.
 - **CFRU** uses 0xFF0 data bytes per sector and stores 25 PC boxes as 58-byte compressed, unencrypted records: boxes 1–19 in storage, 20–22 in flash sectors 30–31, 23–24 in SaveBlock1 at 0x1F08, and 25 in SaveBlock2 at 0xB0. The normal ability slot comes from PID bit 0, and the IV word's top bit marks the hidden ability. PC records carry no PP, contest stats or ribbons, as in the game.
+
+- **Pokémon Monomyth** compresses every save sector: the data area starts with a u16 header (bit 15 = starts with literal words, low bits = packed length), followed by alternating runs of literal u16 words and zero words; `1` at 0xFF0 marks a packed sector and the checksum covers the packed bytes (whole words only). The editor packs exactly as the game does, so an unedited save exports byte for byte. Pokémon records are 80 bytes with vanilla substructure order, but the secure area is XORed with a key mixed from the PID and OT ID (`monomythKey`), the ball sits in the Growth block (5 bits, item id) and the ability number at Misc bits 92–93. SaveBlock2 keeps the encryption key at 0x40; SaveBlock1 has the party count at 0x239, the party at 0x23C and money/coins at 0x494/0x498; box names are 21-byte fields. The game has no natures: the PID is hashed for its internal nature value and stats get no nature modifier.
 
 ### Engine detection
 
@@ -33,9 +37,10 @@ A hack that changes these layouts beyond what the engine does by default will sh
 `loadRomData()` finds tables in any Gen III ROM without knowing the hack:
 
 - Name tables are located from entries every engine keeps (Bulbasaur/Ivysaur/Venusaur, Pound/Karate Chop/Double Slap, Master/Ultra/Great Ball, Stench/Drizzle/Speed Boost). Both inline-name tables (vanilla, CFRU) and records holding name pointers (expansion) are handled.
+- Hacks with their own species order (a regional dex or fakemon, e.g. Monomyth) have no Bulbasaur at #1. Their species and ability tables are found from entry 0 ("??????????", "-------"), the base-stats table from the real Pokémon the hack kept (matched by name, each record whose stats equal the Gen III values votes for a start and stride), and field offsets from what most of those Pokémon agree on. Type ids come from the game's own type-name table, and EXP curves are read from the ROM when a hack reorders or retunes them.
 - The base-stats table is found from Bulbasaur–Charmander's stats. Field offsets for gender ratio, growth rate, abilities (u8 or u16, with or without a hidden slot) and types are learned by matching values that are identical across engines.
 - Move PP comes from the move record (expansion) or a separate battle-move table (vanilla, CFRU).
-- Front sprites and normal/shiny palettes are found from the 8-byte picture/palette tables whose tags run 1, 2, 3… (vanilla, CFRU), or from LZ77 sprite pointers inside expansion's SpeciesInfo records. They are decoded (LZ77 + 4bpp tiles) on the device. Newer expansion builds compress sprites with "smol", which isn't read yet, so they show placeholders.
+- Front sprites and normal/shiny palettes are found from the 8-byte picture/palette tables whose tags run 1, 2, 3… (vanilla, CFRU), or from LZ77 sprite pointers inside expansion's SpeciesInfo records. They are decoded (LZ77 + 4bpp tiles) on the device. Newer expansion builds (and Monomyth) compress sprites with "smol", which isn't read yet, so they show placeholders.
 
 No Pokémon artwork ships with the editor. Without a ROM, slots show an original placeholder (a type-tinted disc with the species' initials); type badges, gender marks, held-item, shiny and status icons are the editor's own.
 

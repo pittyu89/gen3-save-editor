@@ -4,6 +4,7 @@
 //   pex-legacy  pokeemerald-expansion 1.0-1.7
 //   cfru-party  CFRU party Pokémon (vanilla layout, ball byte moved, hidden ability bit)
 //   cfru-box    CFRU PC Pokémon: 58-byte compressed, unencrypted (src/pokemon_storage_system.c)
+//   monomyth    Pokémon Monomyth: 80-byte records with their own encryption key, ball in Growth, no stat natures
 // Party records add 20 bytes (status, level, HP, stats) after the 80-byte box record.
 import { u8, u16, u32, w8, w16, w32 } from "../binary";
 import { decodeText, encodeText, decodeStrict } from "../text";
@@ -21,7 +22,7 @@ const ORDER: number[][] = [
   [1,2,3,0],[1,3,2,0],[2,1,3,0],[3,1,2,0],[2,3,1,0],[3,2,1,0],
 ];
 
-export type CodecId = "vanilla" | "pex-modern" | "pex-legacy" | "cfru-party" | "cfru-box" | "compact-box" | "compact-party";
+export type CodecId = "vanilla" | "pex-modern" | "pex-legacy" | "cfru-party" | "cfru-box" | "compact-box" | "compact-party" | "monomyth";
 
 export interface Pokemon {
   codec: CodecId;            // codec that produced this record
@@ -99,6 +100,8 @@ interface FullSpec {
   ability: { kind: "bit"; bits: Bits } | { kind: "num"; bits: Bits } | { kind: "cfru"; hidden: Bits };
   language: Bits; natureMod?: Bits; markings: Bits; shinyMod?: Bits;   // header (record-relative)
   maxSpecies: number; maxItem: number; maxMove: number; maxPP: number;
+  /** Scrambling the game uses for new records (decoding tries every scheme and keeps the one whose checksum matches). */
+  cipher?: Cipher;
 }
 
 const VANILLA_MOVES: Bits[] = [[12, 0, 16], [14, 0, 16], [16, 0, 16], [18, 0, 16]];
@@ -133,6 +136,19 @@ const SPECS: Record<FullSpec["id"], FullSpec> = {
     language: [0x12, 0, 3], natureMod: [0x12, 3, 5], markings: [0x1b, 0, 4], shinyMod: [0x1e, 14, 1],
     maxSpecies: 2047, maxItem: 1023, maxMove: 2047, maxPP: 127,
   },
+  // Pokémon Monomyth (read from its ROM: GetBoxMonData, DecryptBoxMon, GetNature, CalculateMonStats).
+  // Same field positions as expansion 1.0–1.7 except the ability number, which sits at Misc bits 92-93;
+  // the secure area is XORed with a key mixed from the PID and OT ID (see monomythKey).
+  monomyth: {
+    id: "monomyth", label: "Pokémon Monomyth", nickLen: 10,
+    species: [0, 0, 16], item: [2, 0, 16], exp: [4, 0, 32], ball: [10, 0, 5],
+    moves: VANILLA_MOVES, pp: VANILLA_PP,
+    metLevel: [38, 0, 7], metGame: [38, 7, 4], otGender: [38, 15, 1], egg: [40, 30, 1],
+    ability: { kind: "num", bits: [44, 28, 2] },
+    language: [0x12, 0, 8], markings: [0x1b, 0, 8],
+    maxSpecies: 0xffff, maxItem: 0xffff, maxMove: 0xffff, maxPP: 255,
+    cipher: "monomyth",
+  },
   "cfru-party": {
     id: "cfru-party", label: "CFRU", nickLen: 10,
     species: [0, 0, 16], item: [2, 0, 16], exp: [4, 0, 32], ball: [10, 0, 8],
@@ -153,6 +169,8 @@ export interface CodecInfo {
   /** Party records: where the party-only fields start, and the record size. */
   partyAt: number;
   partySize: number;
+  /** False when the game has no natures: the PID gives none and stats get no nature boost (Monomyth). */
+  natures: boolean;
 }
 
 // ---- Compact, unencrypted records (some decomp hacks, e.g. Emerald Z) ----
@@ -170,16 +188,17 @@ export function codecInfo(id: CodecId): CodecInfo {
   if (id === "compact-box" || id === "compact-party") return {
     id, label: "Compact, unencrypted (decomp hack)", nickLen: 12, maxSpecies: 2047, maxItem: 1023, maxMove: 1023,
     encrypted: false, storesPP: id === "compact-party", hasShinyMod: false, hasNatureMod: false, abilityKind: "num",
-    size: COMPACT_BOX_SIZE, maxBall: 15, partyAt: 0x44, partySize: COMPACT_PARTY_SIZE,
+    size: COMPACT_BOX_SIZE, maxBall: 15, partyAt: 0x44, partySize: COMPACT_PARTY_SIZE, natures: true,
   };
   if (id === "cfru-box") return {
     id, label: "CFRU PC (compressed)", nickLen: 10, maxSpecies: 0xffff, maxItem: 0xffff, maxMove: 1023,
-    encrypted: false, storesPP: false, hasShinyMod: false, hasNatureMod: false, abilityKind: "cfru", size: CFRU_BOX_SIZE, maxBall: 255, partyAt: 0x50, partySize: PARTY_SIZE,
+    encrypted: false, storesPP: false, hasShinyMod: false, hasNatureMod: false, abilityKind: "cfru", size: CFRU_BOX_SIZE, maxBall: 255, partyAt: 0x50, partySize: PARTY_SIZE, natures: true,
   };
   const s = SPECS[id];
   return {
     id, label: s.label, nickLen: s.nickLen, maxSpecies: s.maxSpecies, maxItem: s.maxItem, maxMove: s.maxMove,
     encrypted: true, storesPP: true, hasShinyMod: !!s.shinyMod, hasNatureMod: !!s.natureMod, abilityKind: s.ability.kind, size: BOX_SIZE, maxBall: (1 << s.ball[2]) - 1, partyAt: 0x50, partySize: PARTY_SIZE,
+    natures: id !== "monomyth",
   };
 }
 
@@ -204,11 +223,28 @@ export function decodePokemon(b: Uint8Array, o: number, isParty: boolean, codec:
   return m;
 }
 
-export type Cipher = "vanilla" | "plain" | "plain-ordered" | "xor-ordered";
-const CIPHERS: Cipher[] = ["vanilla", "plain", "plain-ordered", "xor-ordered"];
+export type Cipher = "vanilla" | "plain" | "plain-ordered" | "xor-ordered" | "monomyth";
+const CIPHERS: Cipher[] = ["vanilla", "plain", "plain-ordered", "xor-ordered", "monomyth"];
+
+const ror = (x: number, n: number) => ((x >>> n) | (x << (32 - n))) >>> 0;
+/** Pokémon Monomyth's record key (DecryptBoxMon at 0x08068178 in v1.1): PID and OT ID mixed with
+ *  rotations instead of a plain XOR. The substructure order is vanilla. */
+export function monomythKey(pid: number, otId: number): number {
+  let r3 = (otId + ror((pid ^ 0x690) >>> 0, 7)) >>> 0;
+  r3 = ror((r3 + ror(pid, 11)) >>> 0, 13);
+  const r0 = ror((0x5a000000 ^ r3 ^ otId) >>> 0, 17);
+  return ((pid + r0) >>> 0 ^ ror(otId, 5)) >>> 0;
+}
+function cipherKey(c: Cipher, pid: number, otId: number): number {
+  if (c === "vanilla" || c === "xor-ordered") return (pid ^ otId) >>> 0;
+  if (c === "monomyth") return monomythKey(pid, otId);
+  return 0;
+}
+const cipherOrder = (c: Cipher, pid: number) => (c === "vanilla" || c === "plain" || c === "monomyth" ? ORDER[pid % 24] : [0, 1, 2, 3]);
+
 function unscramble(b: Uint8Array, o: number, pid: number, otId: number, c: Cipher): Uint8Array {
-  const key = c === "vanilla" || c === "xor-ordered" ? (pid ^ otId) >>> 0 : 0;
-  const pos = c === "vanilla" || c === "plain" ? ORDER[pid % 24] : [0, 1, 2, 3];
+  const key = cipherKey(c, pid, otId);
+  const pos = cipherOrder(c, pid);
   const sec = new Uint8Array(48);
   for (let blk = 0; blk < 4; blk++) for (let i = 0; i < 12; i += 4) w32(sec, blk * 12 + i, (u32(b, o + 0x20 + pos[blk] * 12 + i) ^ key) >>> 0);
   return sec;
@@ -220,12 +256,13 @@ function decodeFull(b: Uint8Array, o: number, s: FullSpec): Pokemon | null {
   const stored = u16(b, o + 0x1c);
   // The game XORs and shuffles the 48 secure bytes. Some decomp hacks turn that off; try the
   // variants and keep the one whose checksum matches (the vanilla scheme when none does).
-  let sec = new Uint8Array(48), sum = 0, cipher: Cipher = "vanilla";
-  for (const c of CIPHERS) {
+  const home = s.cipher ?? "vanilla";
+  let sec = new Uint8Array(48), sum = 0, cipher: Cipher = home;
+  for (const c of [home, ...CIPHERS.filter(x => x !== home)]) {
     const t = unscramble(b, o, pid, otId, c);
     let s2 = 0;
     for (let i = 0; i < 48; i += 2) s2 = (s2 + u16(t, i)) & 0xffff;
-    if (c === "vanilla") { sec = t; sum = s2; }
+    if (c === home) { sec = t; sum = s2; }
     if (s2 === stored) { sec = t; sum = s2; cipher = c; break; }
   }
   const hdr = b.subarray(o, o + 0x20);
@@ -369,9 +406,10 @@ function encodeFull(mon: Pokemon, b: Uint8Array, o: number, s: FullSpec) {
   if (s.shinyMod) setBits(hdr, s.shinyMod, mon.shinyMod & 1);
   w16(hdr, 0x1c, sum);
   b.set(hdr, o);
-  const c = mon.cipher ?? "vanilla";
-  const key = c === "vanilla" || c === "xor-ordered" ? (mon.pid ^ mon.otId) >>> 0 : 0;
-  const pos = c === "vanilla" || c === "plain" ? ORDER[mon.pid % 24] : [0, 1, 2, 3];
+  // a game with its own scheme only reads that scheme, whatever the record used before
+  const c = (sameCodec ? mon.cipher ?? s.cipher : s.cipher ?? mon.cipher) ?? "vanilla";
+  const key = cipherKey(c, mon.pid, mon.otId);
+  const pos = cipherOrder(c, mon.pid);
   for (let blk = 0; blk < 4; blk++)
     for (let i = 0; i < 12; i += 4)
       w32(b, o + 0x20 + pos[blk] * 12 + i, (u32(sec, blk * 12 + i) ^ key) >>> 0);
@@ -488,12 +526,23 @@ export function toParty(m: Pokemon): void {
 export const tid = (m: Pokemon) => m.otId & 0xffff;
 export const sid = (m: Pokemon) => m.otId >>> 16;
 const shinyValue = (m: Pokemon, pid = m.pid) => (tid(m) ^ sid(m) ^ (pid >>> 16) ^ (pid & 0xffff)) & 0xffff;
+/** Monomyth's GetNature(): the PID is hashed before taking it modulo 250, then 25. */
+function monomythNature(pid: number): number {
+  let x = pid >>> 0;
+  x = (x ^ (x >>> 16)) >>> 0; x = Math.imul(x, 0x7feb352d) >>> 0;
+  x = (x ^ (x >>> 15)) >>> 0; x = Math.imul(x, 0x846ca68b) >>> 0;
+  x = (x ^ (x >>> 16)) >>> 0;
+  return (x % 250) % 25;
+}
+/** The nature a PID gives in this codec's game. */
+export const natureOfPid = (pid: number, codec: CodecId = "vanilla") => (codec === "monomyth" ? monomythNature(pid) : (pid >>> 0) % 25);
 /** Nature from the PID (what Gen III shows). */
-export const pidNature = (m: Pokemon) => m.pid % 25;
+export const pidNature = (m: Pokemon) => natureOfPid(m.pid, m.codec);
 /** Nature used for stats; expansion mints change it without touching the PID. */
 export function nature(m: Pokemon): number {
-  const n = (m.pid % 25) ^ (m.natureMod || 0);
-  return n < 25 ? n : m.pid % 25;
+  const base = pidNature(m);
+  const n = base ^ (m.natureMod || 0);
+  return n < 25 ? n : base;
 }
 export function isShiny(m: Pokemon): boolean { return (shinyValue(m) < 8) !== Boolean(m.shinyMod); }
 export function genderOf(species: number, pid: number): "M" | "F" | "-" {
@@ -535,7 +584,7 @@ export function calcStats(m: Pokemon, level: number): number[] | null {
   out.push(hp);
   for (let s = 1; s < 6; s++) {
     let n = Math.trunc(((2 * bs[s] + m.ivs[s] + Math.trunc(m.evs[s] / 4)) * level) / 100) + 5;
-    const mod = NATURE_TABLE(nature(m), s);
+    const mod = codecInfo(m.codec).natures ? NATURE_TABLE(nature(m), s) : 0;
     if (mod === 1) n = Math.trunc((n * 110) / 100);
     if (mod === -1) n = Math.trunc((n * 90) / 100);
     out.push(n);
@@ -578,7 +627,7 @@ export function rerollPid(m: Pokemon, want: { nature?: number; gender?: "M" | "F
   const t = tid(m), s = sid(m);
   const flip = Boolean(m.shinyMod);
   const ok = (pid: number) => {
-    if (want.nature !== undefined && pid % 25 !== want.nature) return false;
+    if (want.nature !== undefined && natureOfPid(pid, m.codec) !== want.nature) return false;
     if (want.parity !== undefined && (pid & 1) !== want.parity) return false;
     if (want.gender && r !== 0 && r !== 254 && r !== 255) {
       if (((pid & 0xff) < r ? "F" : "M") !== want.gender) return false;
@@ -607,7 +656,7 @@ export function setShiny(m: Pokemon, shiny: boolean, codec: CodecId): boolean {
     return true;
   }
   const g = gender(m);
-  const pid = rerollPid(m, { nature: pidNature(m), gender: g === "-" ? undefined : g, shiny, parity: codecInfo(codec).abilityKind === "cfru" && m.abilityNum < 2 ? m.pid & 1 : undefined });
+  const pid = rerollPid(m, { nature: codecInfo(codec).natures ? pidNature(m) : undefined, gender: g === "-" ? undefined : g, shiny, parity: codecInfo(codec).abilityKind === "cfru" && m.abilityNum < 2 ? m.pid & 1 : undefined });
   if (pid === null) return false;
   m.pid = pid;
   return true;

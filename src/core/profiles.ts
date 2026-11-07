@@ -6,7 +6,7 @@
 import type { CodecId } from "./gen3/pokemon";
 
 export type Family = "RS" | "E" | "FRLG";
-export type Engine = "vanilla" | "pex-modern" | "pex-legacy" | "cfru" | "compact";
+export type Engine = "vanilla" | "pex-modern" | "pex-legacy" | "cfru" | "compact" | "monomyth";
 export type Block = "sb2" | "sb1" | "storage" | "ext";
 export interface Loc { block: Block; offset: number }
 
@@ -27,6 +27,11 @@ export interface GameProfile {
   sectionSizes: number[];
   /** Extra sectors read and written as raw data (no checksum), e.g. CFRU's sectors 30-31. */
   extSectors: number[];
+  /** How sectors are stored on flash. "zero-run": Monomyth's compression (runs of literal and zero
+   *  u16 words, flag 1 at 0xFF0, checksum over the compressed bytes); sectionSizes give the unpacked sizes. */
+  sectorCodec?: "zero-run";
+  /** Bytes per box name field, terminator included (9 in vanilla). */
+  boxNameBytes?: number;
   partyCodec: CodecId;
   boxCodec: CodecId;
   /** Which built-in data to use when no ROM is loaded. */
@@ -136,6 +141,25 @@ const COMPACT: Omit<GameProfile, "id" | "name" | "short" | "gameCode"> = {
   notes: ["This hack stores Pokémon in its own compact format. Fields the editor doesn't know are kept unchanged."],
 };
 
+// Pokémon Monomyth (pokeemerald + Emerald Expansion battle engine). Read from v1.1's ROM and a real save:
+// sectors are compressed (see sectorCodec), SaveBlock2 keeps the encryption key at 0x40, SaveBlock1 moves the
+// party to 0x23C (count at 0x239) and money/coins to 0x494/0x498, and box names are 21-byte fields.
+const MONOMYTH: Omit<GameProfile, "id" | "name" | "short" | "gameCode"> = {
+  ...E, engine: "monomyth", chunk: D, sectorCodec: "zero-run",
+  sectionSizes: [0xf68, D, D, D, D, D, D, D, D, D, D, D, D, 0x878],
+  partyCodec: "monomyth", boxCodec: "monomyth", fallbackData: "national",
+  offsets: {
+    sb2: { name: 0x00, gender: 0x08, trainerId: 0x0a, playTime: 0x0e, securityKey: 0x40, familyMarker: 0xac },
+    sb1: { partyCount: 0x239, party: 0x23c, money: 0x494, coins: 0x498 },
+  },
+  boxCount: 14, boxSlots: 30, boxNameBytes: 21,
+  currentBox: { block: "storage", offset: 0 },
+  boxSlot: (b, s) => ({ block: "storage", offset: 4 + (b * 30 + s) * 80 }),
+  boxName: b => ({ block: "storage", offset: 0x8344 + b * 21 }),
+  wallpaper: b => ({ block: "storage", offset: 0x846a + b }),
+  notes: ["Monomyth compresses its save sectors and uses its own Pokémon encryption; both are handled. Natures don't exist in this game."],
+};
+
 export const PROFILES: GameProfile[] = [
   { id: "ruby-us", name: "Pokémon Ruby (US)", short: "Ruby", gameCode: "AXVE", ...RS },
   { id: "sapphire-us", name: "Pokémon Sapphire (US)", short: "Sapphire", gameCode: "AXPE", ...RS },
@@ -145,6 +169,7 @@ export const PROFILES: GameProfile[] = [
   { id: "pex-modern", name: "Emerald hack · pokeemerald-expansion 1.8+", short: "Expansion 1.8+", gameCode: "BPEE", ...PEX, engine: "pex-modern", partyCodec: "pex-modern", boxCodec: "pex-modern" },
   { id: "pex-legacy", name: "Emerald hack · pokeemerald-expansion 1.0–1.7", short: "Expansion 1.0–1.7", gameCode: "BPEE", ...PEX, engine: "pex-legacy", partyCodec: "pex-legacy", boxCodec: "pex-legacy" },
   { id: "cfru", name: "FireRed hack · CFRU", short: "CFRU", gameCode: "BPRE", ...CFRU },
+  { id: "monomyth", name: "Pokémon Monomyth", short: "Monomyth", gameCode: "BPEE", ...MONOMYTH },
   { id: "compact", name: "Emerald hack · compact Pokémon data (e.g. Emerald Z)", short: "Compact", gameCode: "BPEE", ...COMPACT },
 ];
 

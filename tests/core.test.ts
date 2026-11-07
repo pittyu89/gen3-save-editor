@@ -285,7 +285,7 @@ describe("save files", () => {
   });
 
   it("exposes every profile", () => {
-    expect(PROFILES.map(p => p.id)).toEqual(["ruby-us", "sapphire-us", "emerald-us", "firered-us", "leafgreen-us", "pex-modern", "pex-legacy", "cfru", "compact"]);
+    expect(PROFILES.map(p => p.id)).toEqual(["ruby-us", "sapphire-us", "emerald-us", "firered-us", "leafgreen-us", "pex-modern", "pex-legacy", "cfru", "monomyth", "compact"]);
     for (const p of PROFILES) expect(p.sectionSizes.length).toBe(14);
     expect(u16(new Uint8Array([1, 2]), 0)).toBe(0x0201);
   });
@@ -572,5 +572,113 @@ describe("compact unencrypted records (Emerald Z style)", () => {
     const r = parse(write(s), P);
     expect(r.boxes[0].slots[0]!.nickname).toBe("MEWTWOOO");
     expect(verify(write(s), s.slot.index, P)).toEqual([]);
+  });
+});
+
+import { zeroRunEncode, zeroRunDecode, packedLength, monomythKey, natureOfPid, codecInfo, standardExp, abilityName } from "../src/core";
+import { fakeRegionalRom, REGIONAL_REAL, REGIONAL_CURVES } from "./rom-fixture";
+
+describe("Pokémon Monomyth", () => {
+  const MM = getProfile("monomyth");
+
+  it("packs sectors the way the game does", () => {
+    // an all-zero section is one zero run: header (4 bytes, no literal start) then 0x7C0 words
+    expect([...zeroRunEncode(new Uint8Array(0xf80))]).toEqual([0x04, 0x00, 0xc0, 0x07]);
+    const d = new Uint8Array(0xf80);
+    d.set([1, 2, 3, 4, 0, 0, 5, 0], 0); d[0xf7e] = 9;
+    const p = zeroRunEncode(d);
+    expect(u16(p, 0)).toBe(0x8000 | p.length);
+    // literal 2 words, zero 1, literal 1 (0x0005), zero up to the last word, literal 1
+    expect([...p.subarray(2, 10)]).toEqual([2, 0, 1, 2, 3, 4, 1, 0]);
+    const sector = new Uint8Array(0x1000).fill(0xff);
+    sector.set(p); w32(sector, 0xff0, 1);
+    expect(packedLength(sector, 0)).toBe(p.length);
+    expect(zeroRunDecode(sector, 0, 0xf80)).toEqual(d);
+  });
+
+  it("uses the game's record key and nature hash", () => {
+    // reference values from an independent model of DecryptBoxMon / GetNature in the v1.1 ROM
+    expect(monomythKey(0x12345678, 0x9abcdef0)).toBe(0x1fff485d);
+    expect(monomythKey(0, 0)).toBe(0x80002d34);
+    expect(monomythKey(0xdeadbeef, 0xcafef00d)).toBe(0xd7c3fc1c);
+    expect(natureOfPid(0x12345678, "monomyth")).toBe(4);
+    expect(natureOfPid(0xffffffff, "monomyth")).toBe(21);
+    expect(natureOfPid(0xffffffff, "vanilla")).toBe(0xffffffff % 25);
+  });
+
+  it("detects, reads and round-trips a compressed save", () => {
+    const bytes = buildSave({ profile: MM, money: 4321, key: 0x1234f833,
+      party: [makeMon(25, 30, { codec: "monomyth", moves: [85, 98, 0, 0], pp: [15, 30, 0, 0], ball: 18, abilityNum: 1 })],
+      boxMons: [{ box: 0, slot: 0, mon: makeMon(150, 70, { codec: "monomyth" }) }, { box: 13, slot: 29, mon: makeMon(4, 12, { codec: "monomyth" }) }] });
+    // every sector is packed and flagged
+    for (let sec = 0; sec < 28; sec++) expect(u32At(bytes, sec * SECTOR_SIZE + 0xff0)).toBe(1);
+    const det = detect(bytes);
+    expect(det.suggestedProfile).toBe("monomyth");
+    expect(det.messages).toEqual([]);
+    const s = parse(bytes, MM);
+    expect(s.warnings).toEqual([]);
+    expect(s.trainer.money).toBe(4321);
+    expect(s.party[0].species).toBe(25);
+    expect(s.party[0].cipher).toBe("monomyth");
+    expect(s.party[0].checksumOk).toBe(true);
+    expect(s.party[0].ball).toBe(18);
+    expect(s.party[0].abilityNum).toBe(1);
+    expect(s.boxes[0].slots[0]?.species).toBe(150);
+    expect(s.boxes[13].slots[29]?.species).toBe(4);
+    expect(s.boxes[13].name).toBe("BOX14");
+    expect(write(s)).toEqual(bytes);
+
+    s.trainer.money = 999999;
+    s.boxes[0].name = "LEGENDS";
+    const mew = s.boxes[0].slots[0]!; mew.nickname = "MEWTWOOO"; mew.ivs = [31, 31, 31, 31, 31, 31]; mew.dirty = true;
+    const out = write(s);
+    expect(verify(out, s.slot.index, MM)).toEqual([]);
+    const r = parse(out, MM);
+    expect(r.warnings).toEqual([]);
+    expect(r.trainer.money).toBe(999999);
+    expect(r.boxes[0].name).toBe("LEGENDS");
+    expect(r.boxes[0].slots[0]!.nickname).toBe("MEWTWOOO");
+    expect(r.boxes[0].slots[0]!.ivs).toEqual([31, 31, 31, 31, 31, 31]);
+    expect(r.boxes[0].slots[0]!.checksumOk).toBe(true);
+  });
+
+  it("gives no nature boost to stats", () => {
+    const m = makeMon(25, 50, { codec: "monomyth", pid: 1 }); // pid 1 is Lonely in Gen III
+    const neutral = makeMon(25, 50, { codec: "monomyth", pid: 0 });
+    expect(codecInfo("monomyth").natures).toBe(false);
+    expect(calcStats(m, 50)).toEqual(calcStats(neutral, 50));
+    expect(calcStats(makeMon(25, 50, { pid: 1 }), 50)).not.toEqual(calcStats(makeMon(25, 50, { pid: 0 }), 50));
+  });
+});
+
+const u32At = (b: Uint8Array, o: number) => (b[o] | (b[o + 1] << 8) | (b[o + 2] << 16) | (b[o + 3] << 24)) >>> 0;
+
+describe("ROMs with their own species order", () => {
+  it("finds names, base stats, abilities, types and EXP curves without Bulbasaur at #1", () => {
+    const rom = fakeRegionalRom();
+    const { data: d, report } = loadRomData(rom);
+    expect(d.species[0]).toBe("??????????");
+    expect(d.species[1]).toBe("Fakemon1");
+    expect(d.species[3]).toBe(VANILLA.species[4]);
+    expect(d.moves[1]).toBe("Pound");
+    expect(d.abilities[0]).toBe("-------");
+    expect(report.some(r => /found by name/.test(r))).toBe(true);
+    setData(d);
+    for (const i of [3, 24, 99]) {
+      const real = REGIONAL_REAL(i), want = VANILLA.info[real]!;
+      const got = d.info[i]!;
+      expect(got.bs).toEqual(want.bs);
+      expect(got.t).toEqual(want.t);
+      expect(got.g).toBe(want.g);
+      expect(REGIONAL_CURVES[got.gr!]).toBe(want.gr);
+      expect(abilityName(got.ab[0])).toBe(VANILLA.abilities[want.ab[0]]);
+    }
+    expect(d.info[1]!.t).toEqual(["Fairy"]);
+    // EXP comes from the ROM's curves
+    expect(d.expTable).toHaveLength(5);
+    const gr = d.info[3]!.gr!;
+    expect(expForLevel(gr, 100)).toBe(standardExp(REGIONAL_CURVES[gr], 100) + 1000);
+    expect(expForLevel(gr, 50)).toBe(standardExp(REGIONAL_CURVES[gr], 50));
+    expect(d.growthNames![gr]).toMatch(/\(modified\)$/);
   });
 });

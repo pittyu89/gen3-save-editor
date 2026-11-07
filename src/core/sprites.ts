@@ -94,7 +94,15 @@ export function findSpriteTables(rom: Uint8Array, speciesCount: number, record?:
   }
   // 1) Vanilla / CFRU tables found by their tags
   const front = findTagTable(rom, 6, 0, 0x800, a => u16(rom, a + 4) === 0x800);
-  if (front >= 0) {
+  // A real species table tags (nearly) every entry with its own index; a short run of matching tags
+  // is some other picture table (hacks that compress sprites differently leave only those behind).
+  const tagged = (at: number) => {
+    const n = Math.min(speciesCount - 1, 400);
+    let ok = 0;
+    for (let sp = 1; sp <= n; sp++) if (u16(rom, at + sp * 8 + 6) === sp) ok++;
+    return n <= 0 || ok >= n * 0.9;
+  };
+  if (front >= 0 && tagged(front)) {
     const pal = findTagTable(rom, 4, 0, 0x20);
     // Shiny palettes use tag = species + SPECIES_SHINY_TAG; find the offset rather than assume it.
     let shiny = -1;

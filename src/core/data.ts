@@ -32,6 +32,10 @@ export interface GameData {
   notes: string[];                // what is missing or approximate in this data set
   /** Which moves each species learns; only read from a ROM. */
   learn?: Learnsets;
+  /** EXP needed for levels 0-100 per growth-rate id, when a hack replaces the standard curves. */
+  expTable?: number[][];
+  /** Names for the growth-rate ids used in `info`, when they differ from the standard order. */
+  growthNames?: string[];
 }
 
 export const CHARMAP: Record<string, string> = raw.charmap;
@@ -112,6 +116,13 @@ export const abilityName = (i: number) => (i === 0 ? "—" : ACTIVE.abilities[i]
 
 /** Experience needed to reach `n` for a growth rate, matching the decomp's integer formulas. */
 export function expForLevel(rate: number, n: number): number {
+  const row = ACTIVE.expTable?.[rate];
+  if (row) return row[Math.max(0, Math.min(100, n))];
+  return standardExp(rate, n);
+}
+
+/** The standard Gen III curves (GROWTH_NAMES order). */
+export function standardExp(rate: number, n: number): number {
   if (n <= 1) return n <= 0 ? 0 : 1;
   const c = n * n * n;
   const t = Math.trunc;

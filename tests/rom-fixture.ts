@@ -1,4 +1,4 @@
-import { encodeBytes, VANILLA, w16, w32, lz77EncodeLiteral } from "../src/core";
+import { encodeBytes, VANILLA, w16, w32, lz77EncodeLiteral, standardExp } from "../src/core";
 
 // ---- Synthetic ROMs: tables in both inline (vanilla/CFRU) and pointer (expansion) styles ----
 
@@ -96,3 +96,44 @@ export function fakeRom(style: "inline" | "pointer"): Uint8Array {
   return rom;
 }
 
+
+// ---- A hack with its own species order (fakemon interleaved with real Pokémon), like Pokémon Monomyth:
+// inline names with "??????????" at entry 0, 24-byte base stats (gender +9, growth +12, u8 abilities
+// +20..22), an ability list in its own order starting "-------", a type-name table with Fairy at 18,
+// and reordered, retuned EXP curves.
+export const REGIONAL_REAL = (i: number) => (i % 3 === 0 ? i + 1 : 0); // ROM index -> Gen III species, or 0 for a fakemon
+export const REGIONAL_CURVES = [2, 5, 3, 0, 4]; // ROM curve id -> standard growth rate
+export function fakeRegionalRom(): Uint8Array {
+  const rom = new Uint8Array(0x200000);
+  rom[0xb2] = 0x96;
+  rom.set(new TextEncoder().encode("REGIONAL"), 0xa0);
+  rom.set(new TextEncoder().encode("BPEE"), 0xac);
+  const N = 150;
+  const abilities = ["-------", ...VANILLA.abilities.slice(1).reverse()];
+  const abId = (vanillaId: number) => (vanillaId ? abilities.indexOf(VANILLA.abilities[vanillaId]) : 0);
+  const TYPES = [...VTYPES.slice(0, 9), "???", ...VTYPES.slice(10), "Fairy"];
+  const romCurve = (std: number) => REGIONAL_CURVES.indexOf(std);
+  const spBase = 0x40000, bsBase = 0x60000;
+  rom.set(encodeBytes("??????????")!, spBase);
+  for (let i = 1; i < N; i++) {
+    const real = REGIONAL_REAL(i), inf = real ? VANILLA.info[real] : null;
+    rom.set(encodeBytes(real ? VANILLA.species[real] : `Fakemon${i}`)!.subarray(0, 11), spBase + i * 11);
+    const r = bsBase + i * 24;
+    const t = inf ? inf.t.map(x => TYPES.indexOf(x)) : [18, 18];
+    rom.set(inf ? inf.bs : [50 + i % 40, 60, 70 + i % 7, 80, 90, 41 + i % 13], r);
+    rom[r + 6] = t[0]; rom[r + 7] = t[1] ?? t[0];
+    rom[r + 8] = 45; rom[r + 9] = inf ? inf.g : 127; rom[r + 10] = 20; rom[r + 11] = 70;
+    rom[r + 12] = inf ? romCurve(inf.gr!) : 1;
+    rom[r + 20] = inf ? abId(inf.ab[0]) : 7; rom[r + 21] = inf ? abId(inf.ab[1] || inf.ab[0]) : 8; rom[r + 22] = 9;
+  }
+  // moves right after the species names, as in pokeemerald
+  const mvBase = spBase + N * 11;
+  for (let i = 0; i < VANILLA.moves.length; i++) rom.set(encodeBytes(VANILLA.moves[i])!.subarray(0, 13), mvBase + i * 13);
+  for (let i = 0; i < abilities.length; i++) rom.set(encodeBytes(abilities[i])!.subarray(0, 13), 0xc0000 + i * 13);
+  for (let i = 0; i < TYPES.length; i++) rom.set(encodeBytes(TYPES[i])!, 0xd0000 + i * 9);
+  // EXP curves in their own order, each 1000 higher at level 100 than the standard one
+  REGIONAL_CURVES.forEach((std, row) => {
+    for (let l = 0; l <= 100; l++) w32(rom, 0xe0000 + row * 404 + l * 4, standardExp(std, l) + (l === 100 ? 1000 : 0));
+  });
+  return rom;
+}

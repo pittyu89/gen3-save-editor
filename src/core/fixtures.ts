@@ -4,7 +4,7 @@ import { encodeText } from "./text";
 import { GameProfile, Block } from "./profiles";
 import { Pokemon, encodePokemon, calcStats, levelOf, codecInfo } from "./gen3/pokemon";
 import { expForLevel, data } from "./data";
-import { SECTOR_SIZE, SIGNATURE } from "./gen3/save";
+import { SECTOR_SIZE, SIGNATURE, zeroRunEncode } from "./gen3/save";
 
 export function makeMon(species: number, level: number, opts: Partial<Pokemon> = {}): Pokemon {
   const gr = data().info[species]?.gr ?? 0;
@@ -44,6 +44,7 @@ export function buildSave(o: FixtureOpts): Uint8Array {
   const key = o.key ?? 0;
   // Family marker at 0xAC: RS = 0, FRLG = 1, Emerald = security key
   if (p.family === "E") w32(sb2, 0xac, key || 0xdeadbeef);
+  if (p.family === "E" && p.offsets.sb2.securityKey !== undefined) w32(sb2, p.offsets.sb2.securityKey, key || 0xdeadbeef);
   if (p.family === "FRLG") { w32(sb2, 0xac, 1); w32(sb2, p.offsets.sb2.securityKey!, key); }
   const realKey = p.family === "E" ? (key || 0xdeadbeef) : p.family === "FRLG" ? key : 0;
   w32(sb1, p.offsets.sb1.money, ((o.money ?? 3000) ^ realKey) >>> 0);
@@ -62,7 +63,7 @@ export function buildSave(o: FixtureOpts): Uint8Array {
   }
   for (let b = 0; b < p.boxCount; b++) {
     const l = p.boxName(b);
-    encodeText(`BOX${b + 1}`, blocks[l.block], l.offset, 9);
+    encodeText(`BOX${b + 1}`, blocks[l.block], l.offset, p.boxNameBytes ?? 9);
   }
   void codecInfo;
 
@@ -75,9 +76,17 @@ export function buildSave(o: FixtureOpts): Uint8Array {
       const phys = slot * 14 + ((id + (o.rotate ?? 0)) % 14);
       const base = phys * SECTOR_SIZE;
       out.fill(0, base, base + SECTOR_SIZE);
-      out.set(sections[id], base);
+      if (p.sectorCodec === "zero-run") {
+        const packed = zeroRunEncode(sections[id].subarray(0, p.sectionSizes[id]));
+        out.fill(0xff, base, base + 0xff0);
+        out.set(packed, base);
+        w32(out, base + 0xff0, 1);
+        w16(out, base + 0xff6, sectorChecksum(out, base, packed.length & ~3));
+      } else {
+        out.set(sections[id], base);
+        w16(out, base + 0xff6, sectorChecksum(out, base, p.sectionSizes[id]));
+      }
       w16(out, base + 0xff4, id);
-      w16(out, base + 0xff6, sectorChecksum(out, base, p.sectionSizes[id]));
       w32(out, base + 0xff8, SIGNATURE);
       w32(out, base + 0xffc, counter);
     }
