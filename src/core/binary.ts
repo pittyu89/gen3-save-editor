@@ -53,15 +53,8 @@ export function romHalves(rom: Uint8Array): Uint16Array {
 }
 
 const POINTERS = new WeakMap<Uint8Array, Uint32Array>();
-/** How many aligned words in the ROM equal `v`. ROM pointers (0x08…–0x09…) are answered from a sorted index. */
-export function countWord(rom: Uint8Array, v: number): number {
-  const x = v >>> 0;
-  if (x < 0x08000000 || x >= 0x0a000000) {
-    const w = romWords(rom);
-    let n = 0;
-    for (let i = 0; i < w.length; i++) if (w[i] === x) n++;
-    return n;
-  }
+/** Every aligned word in the ROM that looks like a ROM pointer, sorted (cached). */
+export function romPointers(rom: Uint8Array): Uint32Array {
   let idx = POINTERS.get(rom);
   if (!idx) {
     const w = romWords(rom);
@@ -72,6 +65,18 @@ export function countWord(rom: Uint8Array, v: number): number {
     idx.sort();
     POINTERS.set(rom, idx);
   }
+  return idx;
+}
+/** How many aligned words in the ROM equal `v`. ROM pointers (0x08…–0x09…) are answered from a sorted index. */
+export function countWord(rom: Uint8Array, v: number): number {
+  const x = v >>> 0;
+  if (x < 0x08000000 || x >= 0x0a000000) {
+    const w = romWords(rom);
+    let n = 0;
+    for (let i = 0; i < w.length; i++) if (w[i] === x) n++;
+    return n;
+  }
+  const idx = romPointers(rom);
   const lower = (t: number) => { let lo = 0, hi = idx!.length; while (lo < hi) { const m = (lo + hi) >>> 1; if (idx![m] < t) lo = m + 1; else hi = m; } return lo; };
   return lower(x + 1) - lower(x);
 }

@@ -1070,6 +1070,7 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
   if (!L) return h("div", { class: "learn" }, h("h4", {}, "Moves it can learn"),
     h("p", { class: "note" }, "Load the game's ROM to see which moves this Pokémon learns."));
   const lv = L.levelUp[m.species] ?? null, teach = L.teach[m.species] ?? null, egg = L.egg[m.species] ?? null;
+  const tutor = L.tutor ? L.tutor[m.species] ?? [] : null;
   const firstEmpty = m.moves.findIndex(x => x === 0);
   const slot = st.teachSlot ?? (firstEmpty >= 0 ? firstEmpty : 3);
   const known = new Set(m.moves.filter(Boolean));
@@ -1105,6 +1106,7 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
       : group("By level", lv.map(([l, mv]) => row(l === 0 ? "Evo" : `Lv ${l}`, mv, lvl !== null && l > lvl)), true, "Learns no moves by level."),
     sortedTeach === null ? h("p", { class: "note" }, `${L.teachTitle} compatibility wasn't found in this ROM.`)
       : group(L.teachTitle, sortedTeach.map(mv => row(L.tmLabel.get(mv) ?? "Tutor", mv)), false, `Can't learn any ${L.teachTitle} moves.`),
+    tutor === null ? null : group("Move tutor", [...tutor].sort((a, b) => C.moveName(a).localeCompare(C.moveName(b))).map(mv => row("Tutor", mv)), false, "Can't learn any tutor moves."),
     egg === null ? null : group("Egg moves", egg.map(mv => row("Egg", mv)), false, "Has no egg moves."));
 }
 

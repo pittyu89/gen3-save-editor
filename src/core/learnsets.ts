@@ -9,7 +9,12 @@
 //             expansion    per-species u16 list ("teachable"), ends 0xFFFF
 //   egg       vanilla      one u16 list: 20000 + species, its moves, next species ..., ends 0xFFFF
 //             expansion    per-species u16 list, ends 0xFFFF
-import { u16, u32, countWord, romWords, romHalves } from "./binary";
+//   tutor     vanilla-style u16 move per tutor (GetTutorMove), then a per-species bitfield right after it
+//             (CanLearnTutorMove): u32 in Emerald (30 tutors), u16 in FireRed (15 + starter moves),
+//             u64 in Monomyth (40); expansion 1.8+ folds tutors into the teachable list instead.
+//             FireRed and CFRU: the code's literals at 0x08120BE4 (moves) and 0x08120C30 (bitfield)
+//             say where both are, since CFRU repoints them; CFRU uses u32[ceil(tutors / 32)] per species
+import { u16, u32, countWord, romWords, romHalves, romPointers } from "./binary";
 
 export interface Learnsets {
   /** [level, move] pairs per species, in the game's order. */
@@ -17,6 +22,8 @@ export interface Learnsets {
   /** Moves taught by TM/HM (vanilla, CFRU) or the engine's teachable list (expansion). */
   teach: (number[] | null)[];
   egg: (number[] | null)[];
+  /** Moves from the game's move tutors, when it keeps them apart from TMs (null: none found). */
+  tutor: (number[] | null)[] | null;
   /** TM/HM number for a move, e.g. "TM24" (vanilla layouts only). */
   tmLabel: Map<number, string>;
   teachTitle: string;
@@ -253,6 +260,94 @@ function findTmTable(rom: Uint8Array, n: number, total: number, anchor: number |
   return pickReferenced(rom, found, true);
 }
 
+/** Width in bytes of a per-species tutor bitfield for `count` moves: the narrowest width whose rows
+ *  never set a bit past the list (FireRed lists 3 starter-only tutors past its 15 bits). */
+function tutorStride(rom: Uint8Array, table: number, n: number, count: number): number | null {
+  for (const stride of [2, 4, 8, 12, 16, 20, 24, 28, 32]) {
+    if (stride * 8 < count - 3 || table + n * stride > rom.length) continue;
+    let ok = true, any = 0;
+    for (let k = 0; k < stride && ok; k++) if (rom[table + k]) ok = false; // species 0 learns nothing
+    for (let s = 1; s < n && ok; s++) {
+      for (let k = 0; k < stride; k++) {
+        const b = rom[table + s * stride + k];
+        if (!b) continue;
+        any++;
+        if (k * 8 + 31 - Math.clz32(b) >= count) { ok = false; break; }
+      }
+    }
+    if (ok && any) return stride;
+  }
+  return null;
+}
+
+/** FireRed-based ROMs: GetTutorMove / CanLearnTutorMove keep their tables' addresses in literal pools. */
+function findTutorsFr(rom: Uint8Array, n: number, moveCount: number): { list: number; count: number; table: number; stride: number } | null {
+  const list = ptr(rom, 0x120be4), table = ptr(rom, 0x120c30);
+  if (list === null || table === null) return null;
+  let count = 0;
+  while (count < 512) { const m = u16(rom, list + count * 2); if (!m || m >= moveCount) break; count++; }
+  if (count < 10) return null;
+  const stride = tutorStride(rom, table, Math.min(n, 2048), count);
+  return stride === null ? null : { list, count, table, stride };
+}
+
+/** Move tutors: a u16 move list followed (directly, or after 2 bytes of padding) by a per-species
+ *  bitfield, both pointed to by code. The bitfield is any width (2, 4, 8 or 16 bytes per species); the
+ *  list may hold a few more moves than the bitfield has bits (FireRed's starter-only tutors). */
+function findTutors(rom: Uint8Array, n: number, moveCount: number, tmTableAt: number): { list: number; count: number; table: number; stride: number } | null {
+  const ptrs = romPointers(rom);
+  const pointedAt = (t: number) => countWord(rom, 0x08000000 + t) > 0;
+  const lowerBound = (v: number) => { let lo = 0, hi = ptrs.length; while (lo < hi) { const m = (lo + hi) >>> 1; if (ptrs[m] < v) lo = m + 1; else hi = m; } return lo; };
+  const pointedBetween = (from: number, to: number) => { const i = lowerBound(0x08000000 + Math.max(0, from)); return i < ptrs.length && ptrs[i] <= 0x08000000 + to; };
+  const rows = Math.min(n, 2048);
+  let best: { list: number; count: number; table: number; stride: number; score: number } | null = null;
+  for (const stride of [2, 4, 8, 12, 16, 20, 24]) {
+    for (let pi = 0; pi < ptrs.length; pi++) {
+      if (pi && ptrs[pi] === ptrs[pi - 1]) continue;
+      const a = ptrs[pi] - 0x08000000;
+      if (a & (stride >= 4 ? 3 : 1) || a === tmTableAt || a + rows * stride > rom.length) continue;
+      let zero = true;
+      for (let k = 0; k < stride; k++) if (rom[a + k]) { zero = false; break; }
+      if (!zero) continue;
+      // the move list must sit just before the table and be pointed at too
+      if (!pointedBetween(a - 2 * (stride * 8 + 4) - 2, a - 20)) continue;
+      // cheap look at the first species before reading the whole table
+      let early = 0;
+      for (let s = 1; s <= 16; s++) for (let k = 0; k < stride; k++) if (rom[a + s * stride + k]) { early++; break; }
+      if (early < 8) continue;
+      // most species can learn something; bits only below the table's width, and a real spread of them
+      let nonzero = 0, top = -1, bits = 0;
+      const seen = new Uint8Array(stride * 8);
+      for (let s = 1; s < rows; s++) {
+        const o = a + s * stride;
+        let any = false;
+        for (let k = 0; k < stride; k++) {
+          const b = rom[o + k];
+          if (!b) continue;
+          any = true;
+          for (let bit = 0; bit < 8; bit++) if (b & (1 << bit)) { const i = k * 8 + bit; if (!seen[i]) { seen[i] = 1; bits++; } if (i > top) top = i; }
+        }
+        if (any) nonzero++;
+      }
+      if (nonzero < (rows - 1) * 0.6 || top < 9 || bits < (top + 1) * 0.75) continue;
+      // the list of moves sits right before the table
+      for (let extra = 0; extra <= 4; extra++) {
+        const count = top + 1 + extra;
+        for (const pad of [0, 2]) {
+          const list = a - pad - count * 2;
+          if (list < 0 || !pointedAt(list)) continue;
+          const mv = Array.from({ length: count }, (_, i) => u16(rom, list + i * 2));
+          const real = mv.filter(m => m > 0 && m < moveCount);
+          if (real.length !== mv.filter(Boolean).length || real.length < count * 0.85 || new Set(real).size !== real.length) continue;
+          const score = nonzero * 4 + bits;
+          if (!best || score > best.score) best = { list, count, table: a, stride, score };
+        }
+      }
+    }
+  }
+  return best && { list: best.list, count: best.count, table: best.table, stride: best.stride };
+}
+
 /** The vanilla egg move list (species markers 20000 + species). */
 function findEggMoves(rom: Uint8Array, n: number, moveCount: number): (number[] | null)[] | null {
   const parse = (a: number) => {
@@ -296,7 +391,7 @@ export function findLearnsets(rom: Uint8Array, speciesCount: number, moveCount: 
   const report: string[] = [];
   const isFr = /^BP[RG]/.test(code);
   const empty = () => Array.from({ length: n }, () => null);
-  const res: Learnsets = { levelUp: empty(), teach: empty(), egg: empty(), tmLabel: new Map(), teachTitle: "TM & HM", report };
+  const res: Learnsets = { levelUp: empty(), teach: empty(), egg: empty(), tutor: null, tmLabel: new Map(), teachTitle: "TM & HM", report };
 
   // Expansion 1.8+: pointers inside each species record
   if (record && record.stride >= 40) {
@@ -340,6 +435,18 @@ export function findLearnsets(rom: Uint8Array, speciesCount: number, moveCount: 
     }
     report.push(`TM/HM moves (${tm.tms} TMs)`);
   } else report.push("TM/HM compatibility not found");
+
+  const tutor = (isFr ? findTutorsFr(rom, n, moveCount) : null) ?? findTutors(rom, n, moveCount, tmTable?.at ?? -1);
+  if (tutor) {
+    const moves = Array.from({ length: tutor.count }, (_, i) => u16(rom, tutor.list + i * 2));
+    res.tutor = Array.from({ length: n }, (_, s) => {
+      if (!s) return null;
+      const o = tutor.table + s * tutor.stride, list: number[] = [];
+      for (let i = 0; i < Math.min(tutor.count, tutor.stride * 8); i++) if (moves[i] && rom[o + (i >> 3)] & (1 << (i & 7))) list.push(moves[i]);
+      return list;
+    });
+    report.push(`tutor moves (${moves.filter(Boolean).length})`);
+  } else report.push("tutor moves not found");
 
   const egg = findEggMoves(rom, n, moveCount);
   if (egg) { res.egg = egg.map(x => x ?? []); report.push("egg moves"); }

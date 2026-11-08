@@ -494,6 +494,52 @@ describe("learnsets", () => {
     // a hack with more moves than the name table the editor found still reads
     expect(findLearnsets(r, N, 20, "BPEE", null).levelUp[7]).toEqual([[1, 33], [5, 8], [9, 45]]);
   });
+  // per-species tutor bits: a spread that sets every bit somewhere
+  const tutorBit = (s: number, i: number) => ((s * 31 + i * 17) % 7) < 3 || i === s % 40;
+  const writeTutors = (r: Uint8Array, list: number, moves: number[], table: number, stride: number, bits: number) => {
+    moves.forEach((m, i) => w16(r, list + i * 2, m));
+    for (let s = 1; s < N; s++) for (let i = 0; i < bits; i++) if (tutorBit(s, i)) r[table + s * stride + (i >> 3)] |= 1 << (i & 7);
+  };
+  const expectTutors = (L: ReturnType<typeof findLearnsets>, moves: number[], bits: number) => {
+    expect(L.tutor).not.toBeNull();
+    for (const s of [1, 7, 23]) expect(L.tutor![s]).toEqual(moves.slice(0, bits).filter((m, i) => m && tutorBit(s, i)));
+  };
+
+  it("reads Emerald-style move tutors (u16 list, then a u32 per species)", () => {
+    const r = rom();
+    const moves = Array.from({ length: 30 }, (_, i) => 5 + i * 7);
+    const list = 0x20000, table = list + 60;
+    writeTutors(r, list, moves, table, 4, 30);
+    w32(r, 0x8000, P(list)); w32(r, 0x8004, P(table));
+    expectTutors(findLearnsets(r, N, MOVES, "BPEE", null), moves, 30);
+  });
+
+  it("reads Monomyth-style move tutors (40, a u64 per species, an empty slot)", () => {
+    const r = rom();
+    const moves = Array.from({ length: 40 }, (_, i) => (i === 3 ? 0 : 50 + i * 5));
+    const list = 0x20000, table = list + 80;
+    writeTutors(r, list, moves, table, 8, 40);
+    w32(r, 0x8000, P(list)); w32(r, 0x8004, P(table));
+    const L = findLearnsets(r, N, MOVES, "BPEE", null);
+    expectTutors(L, moves, 40);
+    expect(L.report).toContain("tutor moves (39)");
+  });
+
+  it("reads FireRed and CFRU move tutors from the code's literals", () => {
+    // FireRed: 18 moves (the last 3 are starter-only), a u16 per species with 15 bits
+    const fr = new Uint8Array(0x130000);
+    const frMoves = Array.from({ length: 18 }, (_, i) => 5 + i * 9);
+    writeTutors(fr, 0x125000, frMoves, 0x126000, 2, 15);
+    w32(fr, 0x120be4, P(0x125000)); w32(fr, 0x120c30, P(0x126000));
+    expectTutors(findLearnsets(fr, N, MOVES, "BPRE", null), frMoves, 15);
+    // CFRU: 146 tutors repointed elsewhere, u32[5] per species
+    const cf = new Uint8Array(0x130000);
+    const cfMoves = Array.from({ length: 146 }, (_, i) => 1 + i);
+    writeTutors(cf, 0x125000, cfMoves, 0x127000, 20, 146);
+    w32(cf, 0x120be4, P(0x125000)); w32(cf, 0x120c30, P(0x127000));
+    expectTutors(findLearnsets(cf, N, MOVES, "BPRE", null), cfMoves, 146);
+  });
+
   it("reads expansion pointers from species records", () => {
     const r = rom();
     const stride = 64, at = 0x20000;
