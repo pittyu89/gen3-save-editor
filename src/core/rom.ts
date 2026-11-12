@@ -2,10 +2,11 @@
 // Works without knowing the hack: tables are located by the names and base stats of entries that
 // every Gen III engine keeps (Bulbasaur, Pound, Master Ball, Stench...), and struct field offsets are
 // learned by matching values that never changed across engines. The ROM is only read, never modified.
-import { u32, countWord, romWords } from "./binary";
+import { u16, u32, countWord, romWords } from "./binary";
 import { encodeBytes, decodeStrict, decodeMessage } from "./text";
 import { GameData, SpeciesInfo, titleCase, TYPE_NAMES, VANILLA, GROWTH_NAMES, standardExp } from "./data";
-import { findLearnsets } from "./learnsets";
+import { findLearnsets, splitTeachable } from "./learnsets";
+import { findEvolutions } from "./evolutions";
 
 export interface RomHeader { title: string; code: string; maker: string; size: number; isGba: boolean }
 
@@ -616,6 +617,8 @@ function loadFromGfHeader(rom: Uint8Array, gf: GfHeader, report: string[]) {
 
 export interface RomLoadResult {
   data: GameData; header: RomHeader; report: string[];
+  /** TM/HM items and the move each teaches, when the item data holds it. */
+  machines?: { item: number; name: string; move: number }[] | null;
   record: { at: number; stride: number } | null;
   gf: GfHeader | null;
 }
@@ -644,12 +647,23 @@ export function loadRomData(rom: Uint8Array): RomLoadResult {
     // expansion keeps learnset pointers in its species records; vanilla layouts use separate tables
     const rec = res.gf && res.gf.speciesNames !== null ? null : res.record;
     d.learn = findLearnsets(rom, d.species.length, d.moves.length, res.header.code, rec);
+    if (d.learn.teachTitle === "TM, HM & tutor" && !rec && res.machines?.length) {
+      // one combined teachable list per species: split it using the TM/HM items' moves
+      splitTeachable(d.learn, res.machines);
+    } else {
+      // name TMs after the game's own TM items when they line up (e.g. Monomyth's TM00 after TM50)
+      const machines = d.items.filter(n => /^(TM|HM)\d+$/.test(n));
+      const order = [...d.learn.tmLabel.keys()];
+      if (machines.length === order.length && order.length) order.forEach((mv, i) => d.learn!.tmLabel.set(mv, machines[i]));
+    }
     res.report.push(...d.learn.report);
-    // name TMs after the game's own TM items when they line up (e.g. Monomyth's TM00 after TM50)
-    const machines = d.items.filter(n => /^(TM|HM)\d+$/.test(n));
-    const order = [...d.learn.tmLabel.keys()];
-    if (machines.length === order.length && order.length) order.forEach((mv, i) => d.learn!.tmLabel.set(mv, machines[i]));
   } catch { res.report.push("learnsets not found"); }
+  try {
+    const d = res.data;
+    d.romCode = res.header.code;
+    const ev = findEvolutions(rom, d.species);
+    if (ev) { d.evos = ev; res.report.push(ev.report); } else res.report.push("evolutions not found");
+  } catch { res.report.push("evolutions not found"); }
   return res;
 }
 
@@ -742,6 +756,7 @@ function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit
     ?? findNameTable(rom, ["Strange Ball", "Poké Ball", "Great Ball"], 21);
   const items = itTable ? readNames(rom, itTable, 1500) : [""];
   report.push(itTable ? `${items.length - 1} items` : "item names not found");
+  const machines = itTable ? machineMoves(rom, itTable, items) : null;
 
   const abTable = findNameTable(rom, ["Stench", "Drizzle", "Speed Boost"], 17)
     ?? (regional ? findTableByEntryZero(rom, "-------", [13, 17], 50) : null);
@@ -817,6 +832,24 @@ function scanRomData(rom: Uint8Array, header: RomHeader, report: string[]): Omit
     items, abilities, shedinja, expTable, growthNames,
     notes: report.filter(r => /not found/.test(r)),
   };
-  return { data: gameData, header, report, record: bs };
+  return { data: gameData, header, report, record: bs, machines };
+}
+
+/** Each TM/HM item's move, read from the item records (decomp hacks keep it in the item's secondary id).
+ *  The field is found from HM01-HM04 teaching Cut, Fly, Surf and Strength. */
+function machineMoves(rom: Uint8Array, t: Table, items: string[]): { item: number; name: string; move: number }[] | null {
+  const hm = ["HM01", "HM02", "HM03", "HM04"].map(n => items.indexOf(n));
+  if (hm.some(i => i < 1)) return null;
+  const rec = (i: number) => t.at + (i - 1) * t.stride;
+  const want = [15, 19, 57, 70];
+  for (let k = -t.stride + 2; k < t.stride - 1; k += 2) {
+    if (!hm.every((i, j) => { const o = rec(i) + k; return o >= 0 && o + 2 <= rom.length && u16(rom, o) === want[j]; })) continue;
+    const out: { item: number; name: string; move: number }[] = [];
+    items.forEach((n, i) => { if (/^(TM|HM)\d+$/.test(n)) out.push({ item: i, name: n, move: u16(rom, rec(i) + k) }); });
+    // TMs before HMs, in number order
+    out.sort((a, b) => (a.name[0] === b.name[0] ? 0 : a.name[0] === "T" ? -1 : 1) || Number(a.name.slice(2)) - Number(b.name.slice(2)));
+    return out;
+  }
+  return null;
 }
 

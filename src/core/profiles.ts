@@ -127,8 +127,9 @@ const CFRU: Omit<GameProfile, "id" | "name" | "short" | "gameCode"> = {
   notes: ["CFRU drops contest stats, ribbons and current PP for Pokémon stored in the PC; the game does the same."],
 };
 
-// Decomp hacks with compact, unencrypted Pokémon (64-byte PC records, 88-byte party records), 18 boxes
-// and full 0xFF4-byte sectors. Reverse-engineered from Pokémon Emerald Z 1.2.0 saves.
+// Pokémon Emerald Z: compact, unencrypted Pokémon (64-byte PC records, 88-byte party records), 18 boxes
+// and full 0xFF4-byte sectors. Record layout read from Emerald Z 1.2.0's GetBoxMonData/SetBoxMonData
+// (see pokemon.ts); every field is known, so records are rebuilt exactly.
 const COMPACT_BOXES = 18, COMPACT_REC = 64, COMPACT_NAMES = 4 + COMPACT_BOXES * 30 * COMPACT_REC;
 const COMPACT: Omit<GameProfile, "id" | "name" | "short" | "gameCode"> = {
   ...E, engine: "compact", chunk: 0xff4,
@@ -140,7 +141,7 @@ const COMPACT: Omit<GameProfile, "id" | "name" | "short" | "gameCode"> = {
   boxSlot: (b, s) => ({ block: "storage", offset: 4 + (b * 30 + s) * COMPACT_REC }),
   boxName: b => ({ block: "storage", offset: COMPACT_NAMES + b * 9 }),
   wallpaper: b => ({ block: "storage", offset: COMPACT_NAMES + COMPACT_BOXES * 9 + b }),
-  notes: ["This hack stores Pokémon in its own compact format. Fields the editor doesn't know are kept unchanged."],
+  notes: ["Emerald Z stores Pokémon in its own compact, unencrypted format; every field is handled, including its stored nature and hyper training."],
 };
 
 // Pokémon Monomyth (pokeemerald + Emerald Expansion battle engine). Read from v1.1's ROM and a real save:
@@ -173,7 +174,7 @@ export const PROFILES: GameProfile[] = [
   { id: "pex-legacy", name: "Emerald hack · pokeemerald-expansion 1.0–1.7", short: "Expansion 1.0–1.7", gameCode: "BPEE", ...PEX, engine: "pex-legacy", partyCodec: "pex-legacy", boxCodec: "pex-legacy" },
   { id: "cfru", name: "FireRed hack · CFRU", short: "CFRU", gameCode: "BPRE", ...CFRU },
   { id: "monomyth", name: "Pokémon Monomyth", short: "Monomyth", gameCode: "BPEE", ...MONOMYTH },
-  { id: "compact", name: "Emerald hack · compact Pokémon data (e.g. Emerald Z)", short: "Compact", gameCode: "BPEE", ...COMPACT },
+  { id: "compact", name: "Pokémon Emerald Z", short: "Emerald Z", gameCode: "BPEE", ...COMPACT },
 ];
 
 export function getProfile(id: string): GameProfile {

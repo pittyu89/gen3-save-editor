@@ -10,5 +10,6 @@ export * from "./rom";
 export * from "./sprites";
 export * from "./repair";
 export * from "./learnsets";
+export * from "./evolutions";
 export * from "./balls";
 export * from "./create";

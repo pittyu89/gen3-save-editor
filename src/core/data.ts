@@ -2,6 +2,7 @@
 // ROM hacks can supply their own through rom.ts. Core code reads the active set via data().
 import raw from "./gamedata.json";
 import type { Learnsets } from "./learnsets";
+import type { Evolutions } from "./evolutions";
 
 export interface SpeciesInfo {
   t: string[];            // type names
@@ -32,6 +33,10 @@ export interface GameData {
   notes: string[];                // what is missing or approximate in this data set
   /** Which moves each species learns; only read from a ROM. */
   learn?: Learnsets;
+  /** How each species evolves; only read from a ROM. */
+  evos?: Evolutions;
+  /** Game code of the ROM the data came from (picks the evolution method list). */
+  romCode?: string;
   /** EXP needed for levels 0-100 per growth-rate id, when a hack replaces the standard curves. */
   expTable?: number[][];
   /** Names for the growth-rate ids used in `info`, when they differ from the standard order. */

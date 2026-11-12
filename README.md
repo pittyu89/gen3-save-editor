@@ -13,7 +13,7 @@ A browser-only save editor for GBA Pokémon games and the two main ROM hack engi
 | pex-legacy | BPEE | pokeemerald-expansion 1.0 → 1.7 | same repo, tags 1.0.0–1.7.x |
 | cfru | BPRE | CFRU (Complete FireRed Upgrade) | Skeli789/Complete-Fire-Red-Upgrade |
 | monomyth | BPEE | Pokémon Monomyth | reverse-engineered from the v1.1 ROM and a real save |
-| compact | BPEE | compact unencrypted records (e.g. Emerald Z) | reverse-engineered from Emerald Z 1.2.0 saves |
+| compact | BPEE | Pokémon Emerald Z | read from the Emerald Z 1.2.0 ROM's GetBoxMonData / SetBoxMonData, checked against a real save |
 
 Western-language releases (EU, Rev 1) share the vanilla layouts. Japanese saves are not supported (different text table).
 
@@ -25,6 +25,27 @@ Western-language releases (EU, Rev 1) share the vanilla layouts. Japanese saves 
 - **CFRU** uses 0xFF0 data bytes per sector and stores 25 PC boxes as 58-byte compressed, unencrypted records: boxes 1–19 in storage, 20–22 in flash sectors 30–31, 23–24 in SaveBlock1 at 0x1F08, and 25 in SaveBlock2 at 0xB0. The normal ability slot comes from PID bit 0, and the IV word's top bit marks the hidden ability. PC records carry no PP, contest stats or ribbons, as in the game.
 
 - **Pokémon Monomyth** compresses every save sector: the data area starts with a u16 header (bit 15 = starts with literal words, low bits = packed length), followed by alternating runs of literal u16 words and zero words; `1` at 0xFF0 marks a packed sector and the checksum covers the packed bytes (whole words only). The editor packs exactly as the game does, so an unedited save exports byte for byte. Pokémon records are 80 bytes with vanilla substructure order, but the secure area is XORed with a key mixed from the PID and OT ID (`monomythKey`), the ball sits in the Growth block (5 bits, item id) and the ability number at Misc bits 92–93. SaveBlock2 keeps the encryption key at 0x40; SaveBlock1 has the party count at 0x239, the party at 0x23C and money/coins at 0x494/0x498; box names are 21-byte fields. The game has no natures: the PID is hashed for its internal nature value and stats get no nature modifier.
+
+- **Pokémon Emerald Z** uses full 0xFF4-byte sectors, 18 PC boxes and compact, unencrypted Pokémon: 64-byte PC records, 88-byte party records. Layout, from the game's GetBoxMonData (0x0818DF3C) and SetBoxMonData (0x0818E3C4):
+
+  | Offset | Contents |
+  |---|---|
+  | 0x00 / 0x04 / 0x08 | PID, OT ID, nickname (12) |
+  | 0x14 | species:11, EXP:21 |
+  | 0x18 | move 1:10, move 2:10, language:3 · 0x1B friendship |
+  | 0x1C | move 3:10, move 4:10, Pokérus:4 · 0x1F PP bonuses |
+  | 0x20 / 0x26 | EVs[6] · cool, beauty, cute, smart, tough, sheen |
+  | 0x2C | held item:10, nature:5 (26 = take it from the PID), egg:1 |
+  | 0x2E | met level:7, met game:3, ball:5 (item id), OT gender:1 · 0x30 met location · 0x31 OT name (7) |
+  | 0x38 | IVs 6×5 bits, ability number:2 (2 = hidden) |
+  | 0x3C | ribbons; hyper-training flags per stat (0x3E bits 6–7, 0x3F bits 0–3); markings (0x3F bits 4–7) |
+  | party | PP[4] 0x40, status 0x44, level 0x48, mail 0x49, HP 0x4A, stats 0x4C |
+
+  The stored nature works like a mint, so changing it keeps the PID; hyper-trained stats count as IV 31. A Pokémon is shiny when the shiny value is below 16, not 8 (IsShinyOtIdPersonality at 0x08191724). Every field is known, so records are rebuilt exactly and an unedited save exports byte for byte. TMs and tutor moves share one per-species "teachable" list (a pointer table right after the level-up table); the editor splits it using each TM/HM item's move from the item data.
+
+### Evolutions
+
+With a ROM loaded, the Info tab shows what a Pokémon evolves into and from, with the condition, and an **Evolve** button. The table is found from well-known evolutions matched by name (Bulbasaur → Ivysaur at 16, …; for regional dexes any known pair at any level), so it works when a hack moves the table, changes its size (5 entries per species in Gen III, 10 in Emerald Z, 8 in Monomyth) or uses expansion-style pointer lists. Methods 1–15 are Gen III's everywhere. Above that, Emerald-based games use pokeemerald-expansion 1.0–1.7's list, FireRed-based games use CFRU's, and Emerald Z (43–45) and Monomyth (31–34) redefine a few, read from each game's GetEvolutionTargetSpecies. If a ROM's level-up method isn't number 4, conditions are shown as raw method numbers rather than guessed.
 
 ### Engine detection
 
@@ -77,7 +98,8 @@ src/core/            pure TypeScript, no DOM
   rom.ts             ROM table discovery
   profiles.ts        per-game/engine offsets, sector sizes, box locations
   gen3/save.ts       sectors, slots, detect / parse / write / verify, engine ranking
-  gen3/pokemon.ts    record codecs (vanilla, expansion ×2, CFRU party/PC), stats, PID tools
+  gen3/pokemon.ts    record codecs (vanilla, expansion ×2, CFRU party/PC, Monomyth, Emerald Z), stats, PID tools
+  evolutions.ts      evolution table discovery and method descriptions
   zip.ts             store-only ZIP writer
   fixtures.ts        synthetic save builder (tests + demo save)
 src/ui/              vanilla DOM UI, bundled with esbuild

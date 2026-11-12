@@ -41,7 +41,8 @@ export function createPokemon(species: number, level: number, profile: GameProfi
   const poke = ballChoices(profile.engine).find(([, n]) => /^pok[eé] ?ball$/i.test(n))?.[0] ?? 4;
   const m: Pokemon = {
     codec, pid, otId: ((trainer.sid << 16) | trainer.tid) >>> 0,
-    nickname: encodableName(speciesName(species), ci.nickLen), language: 2, flags: 0,
+    // Emerald Z names Pokémon in mixed case; Gen III and other hacks use capitals
+    nickname: profile.engine === "compact" ? speciesName(species).slice(0, ci.nickLen) : encodableName(speciesName(species), ci.nickLen), language: 2, flags: 0,
     otName: trainer.name, markings: 0, species, heldItem: 0,
     exp: info && info.gr !== null ? expForLevel(info.gr, lvl) : 0,
     ppBonuses: 0, friendship: 70,

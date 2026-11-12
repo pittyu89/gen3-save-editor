@@ -53,6 +53,8 @@ export interface Pokemon {
   abilityNum: number;        // 0, 1, or 2 (hidden). CFRU derives 0/1 from the PID.
   shinyMod: number;          // expansion: flips shininess without changing the PID
   natureMod: number;         // expansion: XORed with PID nature to give the stat nature (mints)
+  /** Hyper training: bit i set means stat i (HP, Atk, Def, Spe, SpA, SpD) uses IV 31 for stats (Emerald Z). */
+  hyperTrained?: number;
   party?: PartyExtra;
   checksumOk: boolean;
   /** How the secure area is scrambled; hacks may disable the game's encryption. */
@@ -171,34 +173,44 @@ export interface CodecInfo {
   partySize: number;
   /** False when the game has no natures: the PID gives none and stats get no nature boost (Monomyth). */
   natures: boolean;
+  /** Shiny when the shiny value is below this (8 in Gen III, 16 in Emerald Z). */
+  shinyLimit: number;
+  /** Records keep per-stat hyper-training flags. */
+  hyperTraining: boolean;
 }
 
-// ---- Compact, unencrypted records (some decomp hacks, e.g. Emerald Z) ----
-// Read from real saves; fields not listed are kept as they are.
+// ---- Compact, unencrypted records (Pokémon Emerald Z) ----
+// Read from Emerald Z 1.2.0's GetBoxMonData (0x0818DF3C) and SetBoxMonData (0x0818E3C4):
 //   0x00 pid u32 · 0x04 OT id u32 · 0x08 nickname[12]
-//   0x14 u32 species:11 exp:21 · 0x18 u32 move1:10 move2:10 language:4 friendship:8
-//   0x1C u32 move3:10 move4:10 abilityNum:2 (+10 unknown bits) · 0x20 EVs[6] · 0x26 contest[6]
-//   0x2C u16 heldItem:10 (+6) · 0x2E u16 metLevel:7 metGame:4 ball:4 otGender:1 · 0x30 met location
-//   0x31 OT name[7] · 0x38 u32 IVs 6×5 bits (+2 unknown) · 0x3C u32 (unknown)
-//   Verified: computed stats match the stored party stats for every Pokémon in the sample save.
-//   PC record 64 bytes; party adds PP[4] at 0x40, then status/level/HP/stats at 0x44 (88 bytes).
+//   0x14 u32 species:11 exp:21
+//   0x18 u32 move1:10 move2:10 language:3 (+1 spare) · 0x1B friendship
+//   0x1C u32 move3:10 move4:10 pokérus:4 · 0x1F PP bonuses
+//   0x20 EVs[6] · 0x26 cool, beauty, cute, smart, tough, sheen
+//   0x2C u16 heldItem:10 nature:5 isEgg:1   (nature 26 = take it from the PID; anything else overrides it)
+//   0x2E u16 metLevel:7 metGame:3 ball:5 otGender:1 · 0x30 met location · 0x31 OT name[7]
+//   0x38 u32 IVs 6×5 bits, abilityNum:2
+//   0x3C ribbons and flags; 0x3E bits 6-7 and 0x3F bits 0-3 are per-stat hyper training (IV counts as 31),
+//        0x3F bits 4-7 markings
+//   PC record 64 bytes; party adds PP[4] at 0x40, status u32 0x44, level 0x48, mail 0x49, HP 0x4A, stats 0x4C (88 bytes).
+// Shiny when (TID ^ SID ^ PID halves) < 16 (IsShinyOtIdPersonality at 0x08191724).
 export const COMPACT_BOX_SIZE = 64, COMPACT_PARTY_SIZE = 88;
 
 export function codecInfo(id: CodecId): CodecInfo {
   if (id === "compact-box" || id === "compact-party") return {
     id, label: "Compact, unencrypted (decomp hack)", nickLen: 12, maxSpecies: 2047, maxItem: 1023, maxMove: 1023,
-    encrypted: false, storesPP: id === "compact-party", hasShinyMod: false, hasNatureMod: false, abilityKind: "num",
-    size: COMPACT_BOX_SIZE, maxBall: 15, partyAt: 0x44, partySize: COMPACT_PARTY_SIZE, natures: true,
+    encrypted: false, storesPP: id === "compact-party", hasShinyMod: false, hasNatureMod: true, abilityKind: "num",
+    size: COMPACT_BOX_SIZE, maxBall: 31, partyAt: 0x44, partySize: COMPACT_PARTY_SIZE, natures: true,
+    shinyLimit: 16, hyperTraining: true,
   };
   if (id === "cfru-box") return {
     id, label: "CFRU PC (compressed)", nickLen: 10, maxSpecies: 0xffff, maxItem: 0xffff, maxMove: 1023,
-    encrypted: false, storesPP: false, hasShinyMod: false, hasNatureMod: false, abilityKind: "cfru", size: CFRU_BOX_SIZE, maxBall: 255, partyAt: 0x50, partySize: PARTY_SIZE, natures: true,
+    encrypted: false, storesPP: false, hasShinyMod: false, hasNatureMod: false, abilityKind: "cfru", size: CFRU_BOX_SIZE, maxBall: 255, partyAt: 0x50, partySize: PARTY_SIZE, natures: true, shinyLimit: 8, hyperTraining: false,
   };
   const s = SPECS[id];
   return {
     id, label: s.label, nickLen: s.nickLen, maxSpecies: s.maxSpecies, maxItem: s.maxItem, maxMove: s.maxMove,
     encrypted: true, storesPP: true, hasShinyMod: !!s.shinyMod, hasNatureMod: !!s.natureMod, abilityKind: s.ability.kind, size: BOX_SIZE, maxBall: (1 << s.ball[2]) - 1, partyAt: 0x50, partySize: PARTY_SIZE,
-    natures: id !== "monomyth",
+    natures: id !== "monomyth", shinyLimit: 8, hyperTraining: false,
   };
 }
 
@@ -450,27 +462,39 @@ function encodeCompressed(mon: Pokemon, b: Uint8Array, o: number) {
   mon.secure = undefined;
 }
 
+/** Hyper-training flag bits in the compact record's ribbon word (u32 at 0x3C), per stat HP, Atk, Def, Spe, SpA, SpD. */
+const COMPACT_HT_BITS = [26, 27, 22, 23, 24, 25];
+/** Stored nature value meaning "use the PID's nature". */
+const COMPACT_PID_NATURE = 26;
+
 function decodeCompact(b: Uint8Array, o: number, codec: CodecId): Pokemon | null {
   const w14 = u32(b, o + 0x14), w18 = u32(b, o + 0x18), w1c = u32(b, o + 0x1c);
   const species = w14 & 0x7ff;
   if (species === 0) return null;
-  const pid = u32(b, o), origin = u16(b, o + 0x2e), ivw = u32(b, o + 0x38);
+  const pid = u32(b, o), item = u16(b, o + 0x2c), origin = u16(b, o + 0x2e), ivw = u32(b, o + 0x38), rib = u32(b, o + 0x3c);
   const party = codec === "compact-party";
+  const storedNature = (item >>> 10) & 0x1f;
+  const pidN = (pid >>> 0) % 25;
+  const isEgg = (item >>> 15) === 1;
   const m: Pokemon = {
     codec, pid, otId: u32(b, o + 4),
-    nickname: decodeText(b, o + 8, 12), language: (w18 >>> 20) & 0xf, flags: 0,
-    otName: decodeText(b, o + 0x31, 7), markings: 0,
-    species, heldItem: u16(b, o + 0x2c) & 0x3ff, exp: w14 >>> 11, ppBonuses: 0, friendship: w18 >>> 24,
-    ball: (origin >>> 11) & 0xf,
+    nickname: decodeText(b, o + 8, 12), language: (w18 >>> 20) & 7, flags: isEgg ? 0x06 : 0x02,
+    otName: decodeText(b, o + 0x31, 7), markings: (rib >>> 28) & 0xf,
+    species, heldItem: item & 0x3ff, exp: w14 >>> 11, ppBonuses: b[o + 0x1f], friendship: b[o + 0x1b],
+    ball: (origin >>> 10) & 0x1f,
     moves: [w18 & 0x3ff, (w18 >>> 10) & 0x3ff, w1c & 0x3ff, (w1c >>> 10) & 0x3ff], pp: [0, 0, 0, 0],
     evs: [0, 1, 2, 3, 4, 5].map(i => b[o + 0x20 + i]), contest: [0, 1, 2, 3, 4, 5].map(i => b[o + 0x26 + i]),
-    pokerus: 0, metLocation: b[o + 0x30],
-    metLevel: origin & 0x7f, metGame: (origin >>> 7) & 0xf, otGender: (origin >>> 15) & 1,
-    ivs: [0, 1, 2, 3, 4, 5].map(i => (ivw >>> (i * 5)) & 31), isEgg: false, // egg flag not identified yet
-    abilityNum: (w1c >>> 20) & 3, shinyMod: 0, natureMod: 0, checksumOk: true,
+    pokerus: (w1c >>> 20) & 0xf, metLocation: b[o + 0x30],
+    metLevel: origin & 0x7f, metGame: (origin >>> 7) & 7, otGender: (origin >>> 15) & 1,
+    ivs: [0, 1, 2, 3, 4, 5].map(i => (ivw >>> (i * 5)) & 31), isEgg,
+    abilityNum: ivw >>> 30, shinyMod: 0,
+    // the editor's nature override is XORed with the PID nature (as in expansion); 0 = no override
+    natureMod: storedNature < 25 ? (storedNature ^ pidN) || 0 : 0,
+    hyperTrained: COMPACT_HT_BITS.reduce((acc, bit, i) => acc | (((rib >>> bit) & 1) << i), 0),
+    checksumOk: true,
     raw: b.slice(o, o + (party ? COMPACT_PARTY_SIZE : COMPACT_BOX_SIZE)),
   };
-  m.pp = party ? [0, 1, 2, 3].map(i => b[o + 0x40 + i]) : m.moves.map((mv, i) => maxPP(mv, 0, i));
+  m.pp = party ? [0, 1, 2, 3].map(i => b[o + 0x40 + i]) : m.moves.map((mv, i) => maxPP(mv, m.ppBonuses, i));
   return m;
 }
 
@@ -483,18 +507,26 @@ function encodeCompact(mon: Pokemon, b: Uint8Array, o: number, codec: CodecId) {
   writeName(mon, [...mon.nickname].slice(0, 12).join(""), 8, 12, r);
   w32(r, 0x14, ((mon.species & 0x7ff) | ((mon.exp & 0x1fffff) << 11)) >>> 0);
   const mv = mon.moves.map(x => x & 0x3ff);
-  w32(r, 0x18, (mv[0] | (mv[1] << 10) | ((mon.language & 0xf) << 20) | ((mon.friendship & 0xff) << 24)) >>> 0);
-  const keep1c = u32(r, 0x1c) & 0xffc00000;
-  w32(r, 0x1c, (keep1c | mv[2] | (mv[3] << 10) | ((mon.abilityNum & 3) << 20)) >>> 0);
+  const keep18 = u32(r, 0x18) & 0x00800000;   // spare bit
+  w32(r, 0x18, (keep18 | mv[0] | (mv[1] << 10) | ((mon.language & 7) << 20)) >>> 0);
+  r[0x1b] = mon.friendship & 0xff;
+  w32(r, 0x1c, (mv[2] | (mv[3] << 10) | ((mon.pokerus & 0xf) << 20)) >>> 0);
+  r[0x1f] = mon.ppBonuses & 0xff;
   mon.evs.forEach((v, i) => { r[0x20 + i] = v; });
   mon.contest.forEach((v, i) => { r[0x26 + i] = v; });
-  w16(r, 0x2c, (u16(r, 0x2c) & 0xfc00) | (mon.heldItem & 0x3ff));
-  w16(r, 0x2e, (mon.metLevel & 0x7f) | ((mon.metGame & 0xf) << 7) | ((mon.ball & 0xf) << 11) | ((mon.otGender & 1) << 15));
+  const pidN = (mon.pid >>> 0) % 25, eff = pidN ^ (mon.natureMod || 0);
+  const storedNature = mon.natureMod && eff < 25 ? eff : COMPACT_PID_NATURE;
+  w16(r, 0x2c, (mon.heldItem & 0x3ff) | (storedNature << 10) | ((mon.isEgg ? 1 : 0) << 15));
+  w16(r, 0x2e, (mon.metLevel & 0x7f) | ((mon.metGame & 7) << 7) | ((mon.ball & 0x1f) << 10) | ((mon.otGender & 1) << 15));
   r[0x30] = mon.metLocation & 0xff;
   writeName(mon, mon.otName, 0x31, 7, r);
-  let ivw = u32(r, 0x38) & 0xc0000000; // top two bits: meaning unknown, kept
+  let ivw = 0;
   mon.ivs.forEach((v, i) => { ivw |= (v & 31) << (i * 5); });
-  w32(r, 0x38, ivw >>> 0);
+  w32(r, 0x38, (ivw | ((mon.abilityNum & 3) << 30)) >>> 0);
+  let rib = u32(r, 0x3c) & ~(0xf0000000 | COMPACT_HT_BITS.reduce((a, bit) => a | (1 << bit), 0));
+  rib |= (mon.markings & 0xf) << 28;
+  COMPACT_HT_BITS.forEach((bit, i) => { if ((mon.hyperTrained ?? 0) & (1 << i)) rib |= 1 << bit; });
+  w32(r, 0x3c, rib >>> 0);
   if (codec === "compact-party") { mon.pp.forEach((v, i) => { r[0x40 + i] = v; }); b.set(r, o); }
   else b.set(r.subarray(0, COMPACT_BOX_SIZE), o);
   const size = codec === "compact-party" ? COMPACT_PARTY_SIZE : COMPACT_BOX_SIZE;
@@ -544,7 +576,7 @@ export function nature(m: Pokemon): number {
   const n = base ^ (m.natureMod || 0);
   return n < 25 ? n : base;
 }
-export function isShiny(m: Pokemon): boolean { return (shinyValue(m) < 8) !== Boolean(m.shinyMod); }
+export function isShiny(m: Pokemon): boolean { return (shinyValue(m) < codecInfo(m.codec).shinyLimit) !== Boolean(m.shinyMod); }
 export function genderOf(species: number, pid: number): "M" | "F" | "-" {
   const r = data().info[species]?.g ?? 255;
   if (r === 255) return "-";
@@ -579,11 +611,12 @@ export function calcStats(m: Pokemon, level: number): number[] | null {
   const bs = data().info[m.species]?.bs;
   if (!bs || bs.every(x => x === 0)) return null;
   const out: number[] = [];
+  const iv = (i: number) => ((m.hyperTrained ?? 0) & (1 << i) ? 31 : m.ivs[i]);
   const hp = m.species === data().shedinja ? 1
-    : Math.trunc(((2 * bs[0] + m.ivs[0] + Math.trunc(m.evs[0] / 4)) * level) / 100) + level + 10;
+    : Math.trunc(((2 * bs[0] + iv(0) + Math.trunc(m.evs[0] / 4)) * level) / 100) + level + 10;
   out.push(hp);
   for (let s = 1; s < 6; s++) {
-    let n = Math.trunc(((2 * bs[s] + m.ivs[s] + Math.trunc(m.evs[s] / 4)) * level) / 100) + 5;
+    let n = Math.trunc(((2 * bs[s] + iv(s) + Math.trunc(m.evs[s] / 4)) * level) / 100) + 5;
     const mod = codecInfo(m.codec).natures ? NATURE_TABLE(nature(m), s) : 0;
     if (mod === 1) n = Math.trunc((n * 110) / 100);
     if (mod === -1) n = Math.trunc((n * 90) / 100);
@@ -626,13 +659,14 @@ export function rerollPid(m: Pokemon, want: { nature?: number; gender?: "M" | "F
   const r = data().info[m.species]?.g ?? 255;
   const t = tid(m), s = sid(m);
   const flip = Boolean(m.shinyMod);
+  const limit = codecInfo(m.codec).shinyLimit;
   const ok = (pid: number) => {
     if (want.nature !== undefined && natureOfPid(pid, m.codec) !== want.nature) return false;
     if (want.parity !== undefined && (pid & 1) !== want.parity) return false;
     if (want.gender && r !== 0 && r !== 254 && r !== 255) {
       if (((pid & 0xff) < r ? "F" : "M") !== want.gender) return false;
     }
-    const sh = (((t ^ s ^ (pid >>> 16) ^ (pid & 0xffff)) & 0xffff) < 8) !== flip;
+    const sh = (((t ^ s ^ (pid >>> 16) ^ (pid & 0xffff)) & 0xffff) < limit) !== flip;
     if (want.shiny !== undefined && sh !== want.shiny) return false;
     return true;
   };
@@ -652,7 +686,7 @@ export function rerollPid(m: Pokemon, want: { nature?: number; gender?: "M" | "F
 /** Sets shininess: flips the expansion modifier bit when available, otherwise rerolls the PID. */
 export function setShiny(m: Pokemon, shiny: boolean, codec: CodecId): boolean {
   if (codecInfo(codec).hasShinyMod) {
-    m.shinyMod = ((shinyValue(m) < 8) !== shiny) ? 1 : 0;
+    m.shinyMod = ((shinyValue(m) < codecInfo(codec).shinyLimit) !== shiny) ? 1 : 0;
     return true;
   }
   const g = gender(m);

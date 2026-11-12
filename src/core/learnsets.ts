@@ -379,6 +379,39 @@ function findEggMoves(rom: Uint8Array, n: number, moveCount: number): (number[] 
 // FireRed/LeafGreen (and CFRU, which keeps them) load these tables through fixed literal-pool words.
 const FR_ANCHORS = { levelUp: 0x43e20, tmLearn: 0x43c68, tmMoves: 0x125a8c };
 
+/** A pointer table of teachable-move lists starting right after the level-up table (one entry per species). */
+function findTeachableAfter(rom: Uint8Array, lvAt: number, n: number, moveCount: number): number | null {
+  const sample = SAMPLE(n);
+  for (const count of [n, n + 1, n - 1]) {
+    const at = lvAt + count * 4;
+    let ok = 0, nonEmpty = 0;
+    for (const s of sample) {
+      const p = ptr(rom, at + s * 4);
+      const l = p === null ? null : readMoveList(rom, p, moveCount);
+      if (l) { ok++; if (l.length) nonEmpty++; }
+    }
+    if (ok >= sample.length * 0.9 && nonEmpty >= sample.length * 0.5) return at;
+  }
+  return null;
+}
+
+/**
+ * Splits combined teachable lists into TM/HM moves and tutor moves, given each TM/HM item's move
+ * (from the item data). Labels TMs after their items.
+ */
+export function splitTeachable(L: Learnsets, machines: { name: string; move: number }[]): void {
+  if (!machines.length) return;
+  const label = new Map<number, string>();
+  for (const m of machines) if (!label.has(m.move)) label.set(m.move, m.name);
+  L.tmLabel = label;
+  L.tutor = L.teach.map(list => list === null ? null : list.filter(mv => !label.has(mv)));
+  L.teach = L.teach.map(list => list === null ? null : list.filter(mv => label.has(mv)));
+  L.teachTitle = "TM & HM";
+  const tutors = new Set(L.tutor.flatMap(l => l ?? []));
+  L.report = L.report.map(r => r === "teachable moves" ? `TM/HM moves (${machines.length} machines)` : r);
+  L.report.push(`tutor moves (${tutors.size})`);
+}
+
 /**
  * Finds the learnset tables in a ROM. `record` is the expansion SpeciesInfo layout (pointers live there);
  * pass null for vanilla-layout ROMs.
@@ -421,6 +454,19 @@ export function findLearnsets(rom: Uint8Array, speciesCount: number, moveCount: 
     for (let s = 1; s < n; s++) { const p = ptr(rom, lv.at + s * 4); res.levelUp[s] = p === null ? null : readLevelUp(rom, p, lv.fmt, moveCount, false); }
     report.push("level-up moves");
   } else report.push("level-up moves not found");
+
+  // Some decomp hacks (e.g. Emerald Z) put a per-species "teachable" pointer table (TMs, HMs and tutor
+  // moves in one u16 list ending 0xFFFF) right after the level-up pointer table.
+  const teachAt = lv ? findTeachableAfter(rom, lv.at, n, moveCount) : null;
+  if (teachAt !== null) {
+    for (let s = 1; s < n; s++) { const p = ptr(rom, teachAt + s * 4); res.teach[s] = p === null ? null : readMoveList(rom, p, moveCount); }
+    res.teachTitle = "TM, HM & tutor";
+    report.push("teachable moves");
+    const egg = findEggMoves(rom, n, moveCount);
+    if (egg) { res.egg = egg.map(x => x ?? []); report.push("egg moves"); }
+    else report.push("egg moves not found");
+    return res;
+  }
 
   const tm = findTmMoves(rom, moveCount, isFr ? FR_ANCHORS.tmMoves : null);
   const tmTable = tm ? findTmTable(rom, n, tm.total, isFr ? FR_ANCHORS.tmLearn : null) : null;

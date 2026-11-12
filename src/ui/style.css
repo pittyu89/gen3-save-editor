@@ -161,6 +161,8 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
 .statrow { display: grid; grid-template-columns: 44px minmax(0, 1fr) minmax(0, 1fr) 48px; gap: 6px; align-items: center; font-variant-numeric: tabular-nums; }
 .statrow.head, .statrow.foot { font-size: 0.74rem; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; }
 .statrow.foot.over { color: var(--bad); }
+.statrow.ht { grid-template-columns: 44px minmax(0, 1fr) 28px minmax(0, 1fr) 48px; }
+.statrow .htbox { justify-content: center; }
 .statlab { font-weight: 700; font-size: 0.85rem; }
 .statval { text-align: right; font-weight: 700; }
 .facts { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 0; font-size: 0.85rem; }
@@ -360,6 +362,7 @@ select.compact { padding: 4px 6px; font-size: 0.85rem; }
   .fields.cols3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .moverow { grid-template-columns: minmax(0, 1fr) 72px 44px; }
   .statrow { grid-template-columns: 40px minmax(0, 1fr) minmax(0, 1fr) 44px; }
+  .statrow.ht { grid-template-columns: 40px minmax(0, 1fr) 26px minmax(0, 1fr) 44px; }
   .mark { width: 44px; height: 44px; font-size: 1.1rem; }
 
   .bottombar { display: flex; position: fixed; left: 0; right: 0; bottom: 0; z-index: 20; align-items: center; justify-content: space-between; gap: 12px;
@@ -553,3 +556,13 @@ body.picking { overflow: hidden; }
 .sphead { display: flex; align-items: center; gap: 10px; }
 .sphead .types { margin-top: 4px; display: inline-flex; gap: 4px; }
 .pickrow { flex: none; padding-top: 6px; padding-bottom: 6px; }
+
+/* Evolution */
+.evo { margin-top: 14px; }
+.evo h4 { margin: 0 0 6px; font-size: 0.74rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+.evolist { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.evorow { display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 4px 6px; border-radius: 8px; background: var(--sunk); border: 1px solid var(--line); }
+.evoicon { width: 40px; height: 40px; image-rendering: pixelated; object-fit: contain; }
+.evotext { display: flex; flex-direction: column; min-width: 0; }
+.evotext .small { overflow-wrap: anywhere; }
+.evofrom { margin: 10px 0 4px; }

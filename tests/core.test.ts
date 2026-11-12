@@ -311,7 +311,7 @@ describe("ROM reader", () => {
       expect(d.info[1]!.ab).toEqual([65, 0, 34]);
       expect(d.info[1]!.t).toEqual(["Grass", "Poison"]); expect(d.info[4]!.t).toEqual(["Fire"]);
       expect(d.info[197]!.t).toEqual(["Dark"]);
-      expect(report.some(r => /not found/.test(r) && !/moves|TM|learnsets/.test(r))).toBe(false);
+      expect(report.some(r => /not found/.test(r) && !/moves|TM|learnsets|evolutions/.test(r))).toBe(false);
       setData(d);
       const m = makeMon(1, 12, { abilityNum: 2 });
       expect(abilityId(m)).toBe(34);
@@ -778,5 +778,143 @@ describe("TM lists with their own length", () => {
     expect(d.learn!.tmLabel.get(15)).toBe("HM01");
     expect(d.learn!.tmLabel.get(300)).toBe("HM08");
     expect(d.learn!.teach[3]).toContain(REGIONAL_TMS[3 % 59]);
+  });
+});
+
+import { findEvolutions, describeEvolution, evoScheme, preEvolutions, splitTeachable, Evolution } from "../src/core";
+
+describe("Emerald Z record layout (from its GetBoxMonData)", () => {
+  // builds a 64-byte PC record by hand, field by field as the game stores it
+  const record = (o: { item?: number; nature?: number; egg?: boolean; ball?: number; metGame?: number; ability?: number; ht?: number; marks?: number; rus?: number }) => {
+    const r = new Uint8Array(64);
+    w32(r, 0, 0x12345678); w32(r, 4, (54321 << 16) | 12345);
+    encodeText("Abdominion", r, 8, 12);
+    w32(r, 0x14, 1 | (1000 << 11));                                  // species 1, 1000 EXP
+    w32(r, 0x18, 33 | (45 << 10) | (2 << 20) | (200 << 24));            // moves, language 2, friendship 200
+    w32(r, 0x1c, 73 | (22 << 10) | ((o.rus ?? 0) << 20) | (0b11 << 24)); // moves, pokérus, PP bonuses
+    w16(r, 0x2c, (o.item ?? 0) | ((o.nature ?? 26) << 10) | ((o.egg ? 1 : 0) << 15));
+    w16(r, 0x2e, 5 | ((o.metGame ?? 3) << 7) | ((o.ball ?? 1) << 10) | (1 << 15));
+    r[0x30] = 16;
+    encodeText("Pittlog", r, 0x31, 7);
+    w32(r, 0x38, (31 | (30 << 5) | (29 << 10) | (28 << 15) | (27 << 20) | (26 << 25) | ((o.ability ?? 0) << 30)) >>> 0);
+    const htBits = [26, 27, 22, 23, 24, 25];
+    let rib = (o.marks ?? 0) << 28;
+    htBits.forEach((b, i) => { if ((o.ht ?? 0) & (1 << i)) rib |= 1 << b; });
+    w32(r, 0x3c, rib >>> 0);
+    return r;
+  };
+
+  it("reads every field where the game keeps it", () => {
+    const m = decodePokemon(record({ item: 476, ball: 27, metGame: 5, ability: 2, ht: 0b100001, marks: 0b1010, rus: 3 }), 0, false, "compact-box")!;
+    expect(m.species).toBe(1); expect(m.exp).toBe(1000);
+    expect(m.nickname).toBe("Abdominion"); expect(m.otName).toBe("Pittlog");
+    expect(m.moves).toEqual([33, 45, 73, 22]);
+    expect(m.friendship).toBe(200); expect(m.language).toBe(2); expect(m.ppBonuses).toBe(3);
+    expect(m.heldItem).toBe(476); expect(m.ball).toBe(27); expect(m.metGame).toBe(5); expect(m.metLevel).toBe(5);
+    expect(m.otGender).toBe(1); expect(m.metLocation).toBe(16);
+    expect(m.ivs).toEqual([31, 30, 29, 28, 27, 26]); expect(m.abilityNum).toBe(2);
+    expect(m.hyperTrained).toBe(0b100001); expect(m.markings).toBe(0b1010); expect(m.pokerus).toBe(3);
+    expect(m.isEgg).toBe(false);
+    expect(nature(m)).toBe(0x12345678 % 25);                          // stored 26: nature from the PID
+  });
+
+  it("uses a stored nature over the PID's, and writes it back", () => {
+    const m = decodePokemon(record({ nature: 3 }), 0, false, "compact-box")!;
+    expect(nature(m)).toBe(3);
+    const out = new Uint8Array(64);
+    m.dirty = true; m.natureMod = (m.pid % 25) ^ 10; encodePokemon(m, out, 0, false, "compact-box");
+    expect((u16(out, 0x2c) >> 10) & 31).toBe(10);
+    m.natureMod = 0; encodePokemon(m, out, 0, false, "compact-box");
+    expect((u16(out, 0x2c) >> 10) & 31).toBe(26);
+  });
+
+  it("round-trips every byte of a record", () => {
+    const r = record({ item: 300, nature: 7, egg: true, ball: 12, metGame: 2, ability: 1, ht: 0b010110, marks: 5, rus: 9 });
+    const m = decodePokemon(r, 0, false, "compact-box")!;
+    expect(m.isEgg).toBe(true);
+    m.dirty = true; m.raw = undefined;                                // encode from the fields alone
+    const out = new Uint8Array(64); encodePokemon(m, out, 0, false, "compact-box");
+    expect(out).toEqual(r);
+  });
+
+  it("counts hyper-trained stats as IV 31", () => {
+    setData(VANILLA);
+    const m = decodePokemon(record({}), 0, false, "compact-box")!;
+    m.ivs = [0, 0, 0, 0, 0, 0];
+    const plain = calcStats(m, 50)!;
+    m.hyperTrained = 0b111111;
+    const ht = calcStats(m, 50)!;
+    m.ivs = [31, 31, 31, 31, 31, 31]; m.hyperTrained = 0;
+    expect(ht).toEqual(calcStats(m, 50));
+    expect(ht[0]).toBeGreaterThan(plain[0]);
+  });
+
+  it("is shiny below 16, not 8", () => {
+    const m = decodePokemon(record({}), 0, false, "compact-box")!;
+    const t = m.otId & 0xffff, s = m.otId >>> 16;
+    const pidFor = (sv: number) => (((t ^ s ^ sv) << 16) | 0) >>> 0;   // low half 0: value = t^s^high
+    m.pid = pidFor(12); expect(isShiny(m)).toBe(true);
+    m.pid = pidFor(16); expect(isShiny(m)).toBe(false);
+    expect(codecInfo("compact-box").shinyLimit).toBe(16);
+    expect(codecInfo("vanilla").shinyLimit).toBe(8);
+  });
+});
+
+describe("evolutions", () => {
+  const names = VANILLA.species;
+  const id = (n: string) => names.indexOf(n);
+  const put = (rom: Uint8Array, at: number, e: [number, number, number]) => { w16(rom, at, e[0]); w16(rom, at + 2, e[1]); w16(rom, at + 4, e[2]); };
+  const EVOS: [string, [number, number, string][]][] = [
+    ["Bulbasaur", [[4, 16, "Ivysaur"]]], ["Charmander", [[4, 16, "Charmeleon"]]], ["Squirtle", [[4, 16, "Wartortle"]]],
+    ["Caterpie", [[4, 7, "Metapod"]]], ["Pidgey", [[4, 18, "Pidgeotto"]]], ["Abra", [[4, 16, "Kadabra"]]],
+    ["Eevee", [[7, 96, "Jolteon"], [7, 97, "Vaporeon"], [2, 0, "Espeon"]]], ["Machoke", [[5, 0, "Machamp"]]],
+  ];
+
+  it("reads a fixed table (5 entries per species, as pokeemerald)", () => {
+    const rom = new Uint8Array(0x100000), base = 0x40000;
+    for (const [from, list] of EVOS) list.forEach(([m, p, to], k) => put(rom, base + id(from) * 40 + k * 8, [m, p, id(to)]));
+    const ev = findEvolutions(rom, names)!;
+    expect(ev.levelMethod).toBe(4);
+    expect(ev.list[id("Eevee")]!.map(e => e.target)).toEqual([id("Jolteon"), id("Vaporeon"), id("Espeon")]);
+    expect(preEvolutions(ev.list, id("Machamp")).map(x => x.from)).toEqual([id("Machoke")]);
+  });
+
+  it("reads per-species lists through pointers (expansion 1.8+)", () => {
+    const rom = new Uint8Array(0x100000), ptrs = 0x20000;
+    let cursor = 0x50000;
+    for (const [from, list] of EVOS) {
+      w32(rom, ptrs + id(from) * 4, 0x08000000 + cursor);
+      for (const [m, p, to] of list) { put(rom, cursor, [m, p, id(to)]); cursor += 8; }
+      w16(rom, cursor, 0xffff); cursor += 8;
+    }
+    const ev = findEvolutions(rom, names)!;
+    expect(ev.list[id("Bulbasaur")]).toEqual([{ method: 4, param: 16, target: id("Ivysaur"), extra: 0 }]);
+    expect(ev.list[id("Eevee")]!.length).toBe(3);
+  });
+
+  it("describes methods per game", () => {
+    const N = { species: (i: number) => names[i], item: (i: number) => (i === 804 ? "Scrap Metal" : `Item${i}`), move: (i: number) => `Move${i}` };
+    const say = (method: number, param: number, scheme: ReturnType<typeof evoScheme>) => describeEvolution({ method, param, target: 1, extra: 0 } as Evolution, scheme, N);
+    expect(say(4, 16, "emerald")).toBe("Level 16");
+    expect(say(24, 18, "emerald")).toBe("Level up with high friendship knowing a Fairy-type move");
+    expect(say(24, 13, "emerald")).toBe("Level up with high friendship knowing an Electric-type move");
+    expect(say(29, id("Remoraid"), "emerald")).toBe("Level up with Remoraid in the party");
+    expect(say(43, 29, "emerald-z")).toBe("Level 29 knowing a Fire-type move");
+    expect(say(45, 804, "emerald-z")).toBe("Level up with 50 Scrap Metal in the Bag");
+    expect(say(34, 0, "monomyth")).toBe("Level up during a sandstorm");
+    expect(say(26, 5, "cfru")).toBe("Level up knowing Move5");
+    expect(evoScheme("compact", "BPEE")).toBe("emerald-z");
+    expect(evoScheme(undefined, "BPRE")).toBe("cfru");
+  });
+});
+
+describe("combined teachable lists", () => {
+  it("splits TMs and HMs from tutor moves using the TM items", () => {
+    const L = { levelUp: [], teach: [null, [15, 92, 34, 111]], egg: [], tutor: null, tmLabel: new Map(), teachTitle: "TM, HM & tutor", report: ["teachable moves"] } as any;
+    splitTeachable(L, [{ name: "TM06", move: 92 }, { name: "HM01", move: 15 }]);
+    expect(L.teach[1]).toEqual([15, 92]);
+    expect(L.tutor[1]).toEqual([34, 111]);
+    expect(L.tmLabel.get(92)).toBe("TM06");
+    expect(L.teachTitle).toBe("TM & HM");
   });
 });

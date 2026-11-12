@@ -59,7 +59,9 @@ function pad5(n: number) { return String(n).padStart(5, "0"); }
 function dexNo(s: number): string {
   const d = C.data(), p = st.save?.profile;
   if (d.source === "builtin" && d.nat[s]) return `#${pad3(d.nat[s])}`;
-  if (p && (p.engine === "pex-modern" || p.engine === "pex-legacy" || p.engine === "compact") && s <= 1025) return `#${pad3(s)}`;
+  if (p && (p.engine === "pex-modern" || p.engine === "pex-legacy") && s <= 1025) return `#${pad3(s)}`;
+  // Emerald Z: indexes follow the National Dex up to Enamorus (#905), then its own Pokémon
+  if (p && p.engine === "compact" && s <= 905) return `#${pad3(s)}`;
   return `No. ${s}`;
 }
 const speciesLabel = (s: number) => `${dexNo(s)} ${C.speciesName(s)}`;
@@ -825,11 +827,6 @@ function addPokemon(sel: NonNullable<Sel>) {
     const target: NonNullable<Sel> = sel.where === "party" ? { where: "party", i: Math.min(sel.i, s.party.length) } : sel;
     const m = C.createPokemon(sp, st.addLevel, s.profile, s.trainer, target.where === "party");
     m.cipher = C.saveCipher(s);
-    // formats with fields the editor doesn't decode: start from one of the save's own records
-    if (s.profile.engine === "compact") {
-      const t = [...s.party, ...s.boxes.flatMap(b => b.slots)].find(x => x?.raw && x.codec.startsWith("compact"));
-      if (t) { m.raw = t.raw!.slice(); m.codec = t.codec; m.dirty = true; }
-    }
     setAt(target, m);
     st.sel = target; st.edTab = "info"; st.teachSlot = null; st.sheet = isPhone();
     toast(`Added ${C.speciesName(sp)} at level ${st.addLevel}.`, "good");
@@ -864,6 +861,19 @@ function editor(m: C.Pokemon) {
   const opts = options();
   const stats = lvl !== null ? C.calcStats(m, lvl) : null;
   const isCfru = ci.abilityKind === "cfru";
+
+  const changeSpecies = (ns: number) => editMon(x => {
+    const keepLvl = C.levelOf(x);
+    // an un-nicknamed Pokémon takes the new species' name, in the same case style (Emerald Z uses mixed case)
+    if (x.nickname.toUpperCase() === defaultName(x.species)) {
+      const upper = x.nickname === x.nickname.toUpperCase();
+      x.nickname = (upper ? defaultName(ns) : C.speciesName(ns)).slice(0, ci.nickLen);
+    }
+    x.species = ns;
+    const ab = C.data().info[ns]?.ab;
+    if (ab && !ab[x.abilityNum]) x.abilityNum = isCfru ? x.pid & 1 : 0;
+    if (keepLvl !== null) C.setLevel(x, keepLvl);
+  });
 
   const reroll = (want: Parameters<typeof C.rerollPid>[1]) => {
     const keep = {
@@ -930,16 +940,7 @@ function editor(m: C.Pokemon) {
 
     st.edTab !== "info" ? null : section("Identity",
       h("div", { class: "fields cols2" },
-        field("Species", "mSpecies", pickButton("mSpecies", C.speciesName(m.species), { icon: spriteURL(m.species, false), meta: dexNo(m.species), onclick: () => pickSpecies("Species", m.species, ns => {
-          editMon(x => {
-            const keepLvl = C.levelOf(x);
-            if (x.nickname === defaultName(x.species)) x.nickname = defaultName(ns).slice(0, ci.nickLen);
-            x.species = ns;
-            const ab = C.data().info[ns]?.ab;
-            if (ab && !ab[x.abilityNum]) x.abilityNum = isCfru ? x.pid & 1 : 0;
-            if (keepLvl !== null) C.setLevel(x, keepLvl);
-          });
-        }, v => `Change to ${C.speciesName(v)}`) })),
+        field("Species", "mSpecies", pickButton("mSpecies", C.speciesName(m.species), { icon: spriteURL(m.species, false), meta: dexNo(m.species), onclick: () => pickSpecies("Species", m.species, changeSpecies, v => `Change to ${C.speciesName(v)}`) })),
         nameInput("mNick", "Nickname", m.nickname, ci.nickLen, v => { m.nickname = v; }),
         field("Level", "mLevel", C.canSetLevel(m)
           ? num("mLevel", lvl ?? 1, 1, 100, v => editMon(x => { C.setLevel(x, v); }))
@@ -964,13 +965,16 @@ function editor(m: C.Pokemon) {
           } }),
           h("span", {}, C.isShiny(m) ? "Shiny" : "Not shiny"))),
       ),
-      h("p", { class: "note" }, ci.hasNatureMod
+      h("p", { class: "note" }, ci.hasNatureMod && !ci.hasShinyMod
+        ? "This game stores the nature separately (like a mint), so changing it keeps the personality value. Gender and shininess come from the personality value; changing one picks a new value and keeps the other."
+        : ci.hasNatureMod
         ? "This engine stores shininess and the stat nature separately, so changing them keeps the personality value. Changing gender picks a new one."
         : !ci.natures
           ? "This game has no natures, so stats get no nature boost. Gender and shininess come from the personality value; changing one picks a new value and keeps the other."
         : isCfru
           ? "In CFRU the normal ability slot comes from the personality value, like nature, gender and shininess. Changing one picks a new value and keeps the others."
           : "In Gen III, nature, gender and shininess all come from one personality value, so changing any of them picks a new one and keeps the other two."),
+      m.isEgg ? null : evolutionPanel(m, changeSpecies),
     ),
 
     st.edTab !== "moves" ? null : section("Moves",
@@ -991,19 +995,22 @@ function editor(m: C.Pokemon) {
       })),
       ci.storesPP
         ? h("button", { class: "btn small", onclick: () => editMon(x => { x.pp = x.moves.map((mv, i) => C.maxPP(mv, x.ppBonuses, i)); }) }, "Restore all PP")
-        : h("p", { class: "note" }, "CFRU doesn't store PP for Pokémon in the PC; it's restored when you withdraw them."),
+        : h("p", { class: "note" }, `${st.save?.profile.engine === "compact" ? "Emerald Z" : "CFRU"} doesn't store PP for Pokémon in the PC; it's restored when you withdraw them.`),
       learnable(m, lvl, ci.maxMove)),
 
     st.edTab !== "stats" ? null : section("Stats",
       baseStats(m.species),
       h("div", { class: "stats" },
-        h("div", { class: "statrow head" }, h("span", {}), h("span", {}, "IV"), h("span", {}, "EV"), h("span", {}, "Stat")),
-        STAT_ORDER.map(i => [STAT_LABELS[i], i] as const).map(([lab, i]) => h("div", { class: "statrow" },
+        h("div", { class: `statrow head ${ci.hyperTraining ? "ht" : ""}` }, h("span", {}), h("span", {}, "IV"), ci.hyperTraining ? h("span", { title: "Hyper trained: the stat uses IV 31" }, "HT") : null, h("span", {}, "EV"), h("span", {}, "Stat")),
+        STAT_ORDER.map(i => [STAT_LABELS[i], i] as const).map(([lab, i]) => h("div", { class: `statrow ${ci.hyperTraining ? "ht" : ""}` },
           h("span", { class: "statlab" }, lab),
           num(`mIv${i}`, m.ivs[i], 0, 31, v => editMon(x => { x.ivs[i] = v; }), { "aria-label": `${lab} IV` }),
+          ci.hyperTraining ? h("label", { class: "check htbox", title: `Hyper trained ${lab}` },
+            h("input", { id: `mHt${i}`, type: "checkbox", checked: Boolean((m.hyperTrained ?? 0) & (1 << i)), "aria-label": `${lab} hyper trained`,
+              onchange: () => editMon(x => { x.hyperTrained = (x.hyperTrained ?? 0) ^ (1 << i); }) })) : null,
           num(`mEv${i}`, m.evs[i], 0, 255, v => editMon(x => { x.evs[i] = v; }), { "aria-label": `${lab} EV` }),
           h("span", { class: "statval" }, stats ? stats[i] : m.party ? m.party.stats[i] : "?"))),
-        h("div", { class: `statrow foot ${evTotal > 510 ? "over" : ""}` }, h("span", {}, "Total"), h("span", {}), h("span", {}, `${evTotal}/510`), h("span", {}))),
+        h("div", { class: `statrow foot ${evTotal > 510 ? "over" : ""} ${ci.hyperTraining ? "ht" : ""}` }, h("span", {}, "Total"), h("span", {}), ci.hyperTraining ? h("span", {}) : null, h("span", {}, `${evTotal}/510`), h("span", {}))),
       h("div", { class: "row tight" },
         h("button", { class: "btn small", onclick: () => editMon(x => { x.ivs = [31, 31, 31, 31, 31, 31]; }) }, "Max IVs"),
         h("button", { class: "btn small", onclick: () => editMon(x => { x.evs = [0, 0, 0, 0, 0, 0]; }) }, "Clear EVs"))),
@@ -1096,7 +1103,9 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
       ontoggle: (e: Event) => openGroups.set(title, (e.currentTarget as HTMLDetailsElement).open) },
       h("summary", {}, `${title} · ${items.length}`),
       items.length ? h("ul", {}, items) : h("p", { class: "note" }, empty));
-  const sortedTeach = teach ? [...teach].sort((a, b) => (L.tmLabel.get(a) ?? "~" + C.moveName(a)).localeCompare(L.tmLabel.get(b) ?? "~" + C.moveName(b))) : null;
+  // TMs in number order, then HMs, then anything without a label
+  const teachKey = (mv: number) => { const t = L.tmLabel.get(mv); return t ? (t.startsWith("TM") ? "0" : "1") + t : "2" + C.moveName(mv); };
+  const sortedTeach = teach ? [...teach].sort((a, b) => teachKey(a).localeCompare(teachKey(b), undefined, { numeric: true })) : null;
   return h("div", { class: "learn" },
     h("h4", {}, "Moves it can learn"),
     h("div", { class: "teachto" }, h("span", { class: "muted small" }, "Teach into"),
@@ -1110,7 +1119,38 @@ function learnable(m: C.Pokemon, lvl: number | null, maxMove: number) {
     egg === null ? null : group("Egg moves", egg.map(mv => row("Egg", mv)), false, "Has no egg moves."));
 }
 
-function section(_title: string, ...body: Node[]) {
+/** How this species evolves and what it evolves from, read from the loaded ROM. */
+function evolutionPanel(m: C.Pokemon, changeSpecies: (s: number) => void) {
+  const d = C.data(), ev = d.evos;
+  const head = h("h4", {}, "Evolution");
+  if (!ev) return h("div", { class: "evo" }, head, h("p", { class: "note" }, d.source === "rom"
+    ? "This ROM's evolution data wasn't found."
+    : "Load the game's ROM to see how this Pokémon evolves."));
+  const scheme = C.evoScheme(st.save?.profile.engine, d.romCode ?? "");
+  const names: C.EvoNames = { species: C.speciesName, item: i => d.items[i] || `item ${i}`, move: C.moveName };
+  const say = (e: C.Evolution) => C.describeEvolution(e, scheme, names, ev.levelMethod);
+  // forms share names; list each target once per condition
+  const uniq = <T,>(xs: T[], key: (x: T) => string) => xs.filter((x, i) => xs.findIndex(y => key(y) === key(x)) === i);
+  const into = uniq(ev.list[m.species] ?? [], e => `${e.target}|${say(e)}`);
+  const from = uniq(C.preEvolutions(ev.list, m.species), x => `${x.from}|${say(x.evo)}`);
+  const maxSp = C.codecInfo(m.codec).maxSpecies;
+  const row = (sp: number, cond: string, action: Node | null) =>
+    h("li", { class: "evorow" },
+      h("img", { class: "evoicon", src: spriteURL(sp, false) ?? "", alt: "", "aria-hidden": "true" }),
+      h("span", { class: "evotext" }, h("strong", {}, C.speciesName(sp)), h("span", { class: "muted small" }, cond)),
+      action);
+  return h("div", { class: "evo" }, head,
+    into.length
+      ? h("ul", { class: "evolist" }, into.map(e => row(e.target, say(e), h("button", {
+          class: "btn small", disabled: e.target > maxSp, "aria-label": `Evolve into ${C.speciesName(e.target)}`,
+          onclick: () => { changeSpecies(e.target); toast(`Evolved into ${C.speciesName(e.target)}.`, "good"); },
+        }, "Evolve"))))
+      : h("p", { class: "note" }, "Doesn't evolve."),
+    from.length ? [h("p", { class: "muted small evofrom" }, "Evolves from"),
+      h("ul", { class: "evolist" }, from.map(x => row(x.from, say(x.evo), null)))] : null);
+}
+
+function section(_title: string, ...body: (Node | null)[]) {
   return h("div", { class: "secbody", role: "tabpanel" }, body);
 }
 

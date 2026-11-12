@@ -3,7 +3,7 @@
 //   expansion 1.8+ enum PokeBall (0 Strange, 1 Poké …), 6 bits — include/constants/pokeball.h
 //   expansion <1.8 the ball's item id, 5 bits
 //   CFRU          enum BallTypes (0 Master, 1 Ultra …) — include/new/catching.h
-//   compact       4 bits, read as the ball's item id (Emerald Z keeps balls first in its item list)
+//   compact       the ball's item id, 5 bits (Emerald Z: 1 Poké Ball … 27 Cherish Ball, as its item list)
 //   monomyth      the ball's item id, 5 bits (as expansion <1.8)
 import { data } from "./data";
 import type { Engine } from "./profiles";
@@ -23,7 +23,7 @@ const isBallName = (n: string | undefined) => !!n && /ball$/i.test(n.trim());
 export function ballChoices(engine: Engine): [number, string][] {
   if (engine === "pex-modern") return PEX.map((n, i) => [i, n]);
   if (engine === "cfru") return CFRU.map((n, i) => [i, n]);
-  const items = data().items, max = engine === "pex-legacy" || engine === "monomyth" ? 31 : 15;
+  const items = data().items, max = engine === "pex-legacy" || engine === "monomyth" || engine === "compact" ? 31 : 15;
   const out: [number, string][] = [];
   for (let i = 1; i <= max; i++) {
     const n = items[i];
